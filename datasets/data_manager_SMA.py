@@ -108,8 +108,8 @@ class SMA(object):
         self.rna_mask =  rna_highly_variable_list[0] & rna_highly_variable_list[1] & rna_highly_variable_list[2]
         self.msi_mask = msi_highly_variable_list[0] & msi_highly_variable_list[1] & msi_highly_variable_list[2]
 
-        self.training = self._process_data(rna_adata_list[0:2], msi_adata_list[0:2], training_slides)
-        self.testing = self._process_data(rna_adata_list[2:], msi_adata_list[2:], testing_slides)
+        self.training = self._process_data(rna_adata_list[0:2], msi_adata_list[0:2], training_slides)         #前两个切片
+        self.testing = self._process_data(rna_adata_list[2:], msi_adata_list[2:], testing_slides)             #测试用切片
 
         self.rna_length = (self.rna_mask * 1).sum()
         self.msi_length = (self.msi_mask * 1).sum()

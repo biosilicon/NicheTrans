@@ -15,9 +15,9 @@ def generate_args():
     parser.add_argument('-j', '--workers', default=4, type=int,
                         help="number of data loading workers (default: 4)")
 
-    parser.add_argument('--path_img', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nbt_SMA/Processed_data_used/patches', type=str)
-    parser.add_argument('--rna_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nbt_SMA/Processed_data_used', type=str)
-    parser.add_argument('--msi_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nbt_SMA/Processed_data_used', type=str)
+    parser.add_argument('--path_img', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used/patches', type=str)
+    parser.add_argument('--rna_path', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used', type=str)
+    parser.add_argument('--msi_path', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used', type=str)
 
     # Training options
     parser.add_argument('--max-epoch', default=40, type=int,
