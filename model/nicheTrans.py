@@ -92,28 +92,41 @@ class NicheTrans(nn.Module):
 
 
     def forward(self, source, source_neighbor):
+        # 当前 batch 大小，即中心细胞/spot 的数量。
         b = source.size(0)
+        # 邻居 token 数量，通常对应每个中心位置拼接进来的邻域样本数。
         l = source_neighbor.size(1)
+        # 为中心位置和两类邻居位置构造可学习的空间 token，
+        # 其长度需要与后续拼接后的 token 序列长度一致。
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, l//2, 1), self.token_neigh_2.repeat(1, l//2, 1)], dim=1)
 
+        # 给中心样本增加一个 token 维度，形状从 [b, source_length] 变为 [b, 1, source_length]。
         source = source[:, None, :]
+        # 将中心样本与邻居样本在 token 维拼接，再展平成二维张量，变成 [(b*(1+l)), source_length]
+        # 以便共享同一个 encoder 对每个 token 的组学特征做编码。
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
-        # genome feature extraction, be aware that we add on the features
+        # 提取每个 token 的组学特征，再恢复成 [b, token_num, fea_size]。
         f_omic = self.encoder(omic_data).view(b, -1, self.fea_size) 
+        # 将可学习的空间 token 加到组学特征上，把空间角色信息注入表示中。
         f_omic = f_omic + spatial_tokens
 
+        # 经过一层非线性映射，进一步融合和变换特征。
         f_omic = self.non_linear(f_omic)
 
+        # 自注意力残差块：先 LayerNorm，再做 token 间信息交互，最后与输入残差相加。
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
+        # 前馈网络残差块：对每个 token 的表示逐位置变换，并保留残差连接。
         f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
 
+        # 仅取第 0 个 token（中心位置）的表示做最终预测，并施加 dropout。
         f = self.dropout(f_omic[:, 0, :])
 
-        # final prediction
+        # 为每个目标基因/输出维度使用一个独立的预测头。
         out = []
         for i in range(self.target_length):
             out.append(self.predict_layers[i](f))
+        # 将所有单维预测结果拼接成最终输出 [b, target_length]。
         out = torch.cat(out, dim=1)
 
         return out
