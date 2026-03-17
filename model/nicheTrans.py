@@ -1,5 +1,7 @@
 from __future__ import absolute_import
 
+import math
+
 import torch
 import torchvision
 from torch import nn
@@ -41,6 +43,10 @@ class NetBlock(nn.Module):
 
 # NicheTrans with spatial information only
 class NicheTrans(nn.Module):
+    token_center: torch.Tensor
+    token_neigh_1: torch.Tensor
+    token_neigh_2: torch.Tensor
+
     def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
         super(NicheTrans, self).__init__()
 
@@ -81,14 +87,17 @@ class NicheTrans(nn.Module):
         self.dropout_5 = nn.Dropout(0.5)
 
         ################
-        # initialize tokens for semantic embedding
-        self.token_center = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # initialize tokens for semantic embedding (fixed sinusoidal encoding)
+        with torch.no_grad():
+            pe = torch.zeros(1, 3, self.fea_size)
+            position = torch.arange(3).unsqueeze(1).float()
+            div_term = torch.exp(torch.arange(0, self.fea_size, 2).float() * (-math.log(10000.0) / self.fea_size))
+            pe[0, :, 0::2] = torch.sin(position * div_term)
+            pe[0, :, 1::2] = torch.cos(position * div_term)
 
-        trunc_normal_(self.token_center, std=.02)
-        trunc_normal_(self.token_neigh_1, std=.02)
-        trunc_normal_(self.token_neigh_2, std=.02)
+        self.register_buffer('token_center', pe[:, 0:1, :])
+        self.register_buffer('token_neigh_1', pe[:, 1:2, :])
+        self.register_buffer('token_neigh_2', pe[:, 2:3, :])
 
 
     def forward(self, source, source_neighbor):
