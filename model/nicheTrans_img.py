@@ -71,10 +71,25 @@ class NicheTrans_img(nn.Module):
         trunc_normal_(self.token_neigh_2, std=.02)
         ################
 
+    def _build_absolute_position_tokens(self, token_num, device, dtype):
+        position = torch.arange(token_num, device=device, dtype=dtype).unsqueeze(1)
+        div_term = torch.exp(
+            torch.arange(0, self.fea_size, 2, device=device, dtype=dtype)
+            * (-torch.log(torch.tensor(10000.0, device=device, dtype=dtype)) / self.fea_size)
+        )
+
+        pos_embed = torch.zeros((1, token_num, self.fea_size), device=device, dtype=dtype)
+        pos_embed[0, :, 0::2] = torch.sin(position * div_term)
+        pos_embed[0, :, 1::2] = torch.cos(position * div_term)
+        return pos_embed
+
     def forward(self, img, source, source_neighbor):
         b = img.size(0)
 
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 4, 1), self.token_neigh_2.repeat(1, 4, 1)], dim=1)
+        spatial_tokens = spatial_tokens + self._build_absolute_position_tokens(
+            spatial_tokens.size(1), spatial_tokens.device, spatial_tokens.dtype
+        )
 
         source = source[:, None, :]
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
