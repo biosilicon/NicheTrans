@@ -9,9 +9,9 @@ def generate_args():
     parser.add_argument('-j', '--workers', default=4, type=int,
                         help="number of data loading workers (default: 4)")
 
-    parser.add_argument('--adata_path', default='/home/wzk/ST_data/2024_NicheTrans_upload/2023_nc_10x_breast_cancer/HBC_rep1_cell_nucleus_3channel_strength_mean.h5ad', type=str)
-    parser.add_argument('--coordinate_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nc_10x_breast_cancer/cells.csv.gz', type=str)
-    parser.add_argument('--ct_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nc_10x_breast_cancer/Cell_Barcode_Type_Matrices.xlsx', type=str)
+    parser.add_argument('--adata_path', default='/mnt/datadisk0/Processed_DATA/2023_nc_10x_breast_cancer/HBC_rep1_cell_nucleus_3channel_strength_mean.h5ad', type=str)
+    parser.add_argument('--coordinate_path', default='/mnt/datadisk0/Processed_DATA/2023_nc_10x_breast_cancer/cells.csv.gz', type=str)
+    parser.add_argument('--ct_path', default='/mnt/datadisk0/Processed_DATA/2023_nc_10x_breast_cancer/Cell_Barcode_Type_Matrices.xlsx', type=str)
 
     # Training options
     parser.add_argument('--max-epoch', default=40, type=int,
