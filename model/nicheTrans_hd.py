@@ -20,7 +20,7 @@ class NetBlock(nn.Module):
         
         for i in range(nlayer):
             self.linear_list.append(nn.Linear(dim_list[i], dim_list[i + 1]))
-            nn.init.xavier_uniform_(self.linear_list[i].weight)
+            nn.init.kaiming_uniform_(self.linear_list[i].weight, a=0.01, nonlinearity='leaky_relu')
             self.bn_list.append(nn.BatchNorm1d(dim_list[i + 1]))
             self.activation_list.append(nn.LeakyReLU())
             if not i == nlayer -1: 
