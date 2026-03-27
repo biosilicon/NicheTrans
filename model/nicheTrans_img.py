@@ -17,7 +17,7 @@ class NicheTrans_img(nn.Module):
         noise_rate=0.2,
         dropout_rate=0.1,
         # --- context encoder switch ---
-        context_model_type='transformer',   # 'transformer' | 'gnn'
+        context_model_type='gnn',   # 'transformer' | 'gnn'
         gnn_num_layers=2,
         gnn_hidden_dim=None,
         gnn_graph_type='full',

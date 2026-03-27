@@ -49,7 +49,7 @@ class NicheTrans(nn.Module):
         noise_rate=0.2,
         dropout_rate=0.1,
         # --- context encoder switch ---
-        context_model_type='transformer',   # 'transformer' | 'gnn'
+        context_model_type='gnn',   # 'transformer' | 'gnn'
         gnn_num_layers=2,                   # GNN: number of GraphSAGE layers
         gnn_hidden_dim=None,                # GNN: hidden dim (None → use fea_size)
         gnn_graph_type='full',              # GNN: 'full' (all-to-all) | 'star'
