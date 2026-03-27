@@ -25,18 +25,22 @@ class SMA_loader(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors, sample = self.dataset[index]
-        
+        img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors, spot_type_id, sample = self.dataset[index]
+
         img = read_image(img_path=img_path)
         img = self.transform(img)
 
         rna_temp = torch.Tensor(rna_temp)
         msi_temp = torch.Tensor(msi_temp)
-       
+
         rna_neighbors = torch.Tensor(rna_neighbors)
         msi_neighbors = torch.Tensor(msi_neighbors)
 
-        return img, rna_temp, msi_temp, rna_neighbors, msi_neighbors, sample
+        # spot_type_id is an integer class index used to select the per-type
+        # learnable spatial token inside the model.
+        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
+
+        return img, rna_temp, msi_temp, rna_neighbors, msi_neighbors, spot_type_id, sample
 
 
 class Lymph_node_loader(Dataset):

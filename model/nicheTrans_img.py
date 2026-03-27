@@ -9,11 +9,29 @@ from model.nicheTrans import *
 
 
 class NicheTrans_img(nn.Module):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1,
+                 n_spot_types=1):
+        """
+        Parameters
+        ----------
+        source_length : int
+            Number of input omics features.
+        target_length : int
+            Number of prediction targets.
+        noise_rate : float
+            Dropout rate applied as input noise in the encoder.
+        dropout_rate : float
+            Dropout rate used in FC layers.
+        n_spot_types : int
+            Vocabulary size of the spot-type embedding.  Each spot type gets
+            its own independent learnable center spatial token.  Defaults to 1
+            for backward compatibility (single shared token).
+        """
         super(NicheTrans_img, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.n_spot_types = n_spot_types
 
         self.fea_size, self.img_size = 256, 128
 
@@ -34,7 +52,7 @@ class NicheTrans_img(nn.Module):
 
         self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
         self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
-    
+
         self.ln1 = nn.LayerNorm(self.fea_size)
         self.ln2 = nn.LayerNorm(self.fea_size)
 
@@ -55,45 +73,75 @@ class NicheTrans_img(nn.Module):
         self.non_linear = nn.Sequential(nn.Linear(256, 256),
                                         nn.LayerNorm(256),
                                         nn.LeakyReLU())
-        
+
         self.dropout = nn.Dropout(self.dropout_rate)
         self.dropout_5 = nn.Dropout(0.5)
-        ################
 
         ################
-        # initialize tokens for semantic embedding
-        self.token_center = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # Spatial tokens for ring-level positional encoding.
+        # token_neigh_1 / token_neigh_2 encode ring position and are shared
+        # across all spot types.
+        # token_center_emb provides a per-spot-type learnable center token:
+        # each spot type gets its own independent trainable vector so the model
+        # can learn different "anchor" representations for transcriptomically
+        # distinct spot populations.
         self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
         self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
 
-        trunc_normal_(self.token_center, std=.02)
+        # Per-spot-type center token embedding: shape (n_spot_types, fea_size).
+        self.token_center_emb = nn.Embedding(n_spot_types, self.fea_size)
+
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
-        ################
+        trunc_normal_(self.token_center_emb.weight, std=.02)
 
-    def forward(self, img, source, source_neighbor):
+    def forward(self, img, source, source_neighbor, spot_type=None):
+        """
+        Parameters
+        ----------
+        img : Tensor, shape (B, C, H, W)
+            Histology patch for each center spot.
+        source : Tensor, shape (B, source_length)
+            Center-spot omics features.
+        source_neighbor : Tensor, shape (B, 8, source_length)
+            Neighbor omics features (4 inner + 4 outer ring).
+        spot_type : LongTensor, shape (B,), optional
+            Integer spot-type IDs in ``[0, n_spot_types)``.  Defaults to
+            type 0 for every spot when omitted.
+        """
         b = img.size(0)
 
-        spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 4, 1), self.token_neigh_2.repeat(1, 4, 1)], dim=1)
+        # ── Spot-type-specific center token ──────────────────────────────
+        if spot_type is None:
+            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        # Lookup per-spot center token: (B, fea_size) -> (B, 1, fea_size).
+        center_token = self.token_center_emb(spot_type).unsqueeze(1)
+
+        spatial_tokens = torch.cat(
+            [center_token,
+             self.token_neigh_1.expand(b, 4, -1),
+             self.token_neigh_2.expand(b, 4, -1)],
+            dim=1
+        )  # (B, 9, fea_size)
 
         source = source[:, None, :]
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
         # genome feature extraction, be aware that we add on the features
-        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size) 
+        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size)
         f_omic = f_omic + spatial_tokens
 
         f_omic = self.non_linear(f_omic)
 
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
         f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
-        
+
         # image feature extraction
         f_img = self.pooling(self.base(img)).squeeze()
         f_img = self.dropout_5(f_img)
         f_img = self.img(f_img)
 
-        f = torch.cat([f_omic[:, 0, :], f_img], dim=1) 
+        f = torch.cat([f_omic[:, 0, :], f_img], dim=1)
         f = self.dropout(f)
 
         # final prediction

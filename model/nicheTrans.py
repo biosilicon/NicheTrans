@@ -41,11 +41,30 @@ class NetBlock(nn.Module):
 
 # NicheTrans with spatial information only
 class NicheTrans(nn.Module):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1,
+                 n_spot_types=1):
+        """
+        Parameters
+        ----------
+        source_length : int
+            Number of input omics features (e.g. HVGs).
+        target_length : int
+            Number of prediction targets (e.g. metabolites).
+        noise_rate : float
+            Dropout rate applied as input noise in the encoder.
+        dropout_rate : float
+            Dropout rate used in FC layers.
+        n_spot_types : int
+            Vocabulary size of the spot-type embedding.  Each spot type gets
+            its own independent learnable ``center_spatial_token``.  Set to 1
+            to recover the original single-token behaviour (backward-compatible
+            default).
+        """
         super(NicheTrans, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.n_spot_types = n_spot_types
 
         self.fea_size, self.img_size = 256, 128
 
@@ -55,7 +74,7 @@ class NicheTrans(nn.Module):
 
         self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
         self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
-    
+
         self.ln1 = nn.LayerNorm(self.fea_size)
         self.ln2 = nn.LayerNorm(self.fea_size)
 
@@ -76,29 +95,68 @@ class NicheTrans(nn.Module):
         self.non_linear = nn.Sequential(nn.Linear(256, 256),
                                         nn.LayerNorm(256),
                                         nn.LeakyReLU())
-        
+
         self.dropout = nn.Dropout(self.dropout_rate)
         self.dropout_5 = nn.Dropout(0.5)
 
         ################
-        # initialize tokens for semantic embedding
-        self.token_center = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # Spatial tokens for ring-level positional encoding.
+        # token_neigh_1 / token_neigh_2 are shared across all spot types
+        # (they encode *ring position*, not spot identity).
+        # token_center_emb is spot-type-specific: each spot type has its own
+        # independent learnable center token selected at runtime via an
+        # nn.Embedding lookup.  This lets the model learn different "anchor"
+        # representations for transcriptomically distinct spot populations.
         self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
         self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
 
-        trunc_normal_(self.token_center, std=.02)
+        # Per-spot-type center token: shape (n_spot_types, fea_size).
+        # nn.Embedding provides efficient integer-indexed lookup and is
+        # included in model.parameters() / state_dict() automatically.
+        self.token_center_emb = nn.Embedding(n_spot_types, self.fea_size)
+
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
+        trunc_normal_(self.token_center_emb.weight, std=.02)
 
 
-    def forward(self, source, source_neighbor):
+    def forward(self, source, source_neighbor, spot_type=None):
+        """
+        Parameters
+        ----------
+        source : Tensor, shape (B, source_length)
+            Center-spot omics features.
+        source_neighbor : Tensor, shape (B, L, source_length)
+            Neighbor omics features; L must be even (split equally into two
+            rings).
+        spot_type : LongTensor, shape (B,), optional
+            Integer spot-type IDs in ``[0, n_spot_types)``.  When omitted (or
+            when ``n_spot_types == 1``) all spots use type 0.
+        """
         # 当前 batch 大小，即中心细胞/spot 的数量。
         b = source.size(0)
         # 邻居 token 数量，通常对应每个中心位置拼接进来的邻域样本数。
         l = source_neighbor.size(1)
-        # 为中心位置和两类邻居位置构造可学习的空间 token，
-        # 其长度需要与后续拼接后的 token 序列长度一致。
-        spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, l//2, 1), self.token_neigh_2.repeat(1, l//2, 1)], dim=1)
+
+        # ── Spot-type-specific center token ──────────────────────────────
+        if spot_type is None:
+            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        # Lookup: (B, fea_size) -> (B, 1, fea_size) for concat below.
+        center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
+
+        # Ring tokens are shared; broadcast over the batch dimension.
+        # Shape: (1, L//2, fea_size) each.
+        neigh1_tokens = self.token_neigh_1.repeat(1, l // 2, 1)  # (1, L/2, fea_size)
+        neigh2_tokens = self.token_neigh_2.repeat(1, l // 2, 1)  # (1, L/2, fea_size)
+
+        # Assemble full spatial-token sequence: (B, 1+L, fea_size).
+        # center_token is (B, 1, fea_size); ring tokens broadcast from (1, *, fea_size).
+        spatial_tokens = torch.cat(
+            [center_token,
+             neigh1_tokens.expand(b, -1, -1),
+             neigh2_tokens.expand(b, -1, -1)],
+            dim=1
+        )  # (B, 1+L, fea_size)
 
         # 给中心样本增加一个 token 维度，形状从 [b, source_length] 变为 [b, 1, source_length]。
         source = source[:, None, :]
@@ -107,8 +165,10 @@ class NicheTrans(nn.Module):
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
         # 提取每个 token 的组学特征，再恢复成 [b, token_num, fea_size]。
-        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size) 
+        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size)
         # 将可学习的空间 token 加到组学特征上，把空间角色信息注入表示中。
+        # center_token 已经是 spot-type-specific，因此不同类型的 spot 会
+        # 获得不同的空间偏置，ring tokens 仍共享。
         f_omic = f_omic + spatial_tokens
 
         # 经过一层非线性映射，进一步融合和变换特征。
@@ -130,4 +190,3 @@ class NicheTrans(nn.Module):
         out = torch.cat(out, dim=1)
 
         return out
-    

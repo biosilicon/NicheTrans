@@ -9,6 +9,51 @@ import sklearn.neighbors
 from collections import defaultdict
 
 
+def assign_spot_types(adata, n_pcs=30, n_neighbors=15, resolution=0.5, verbose=True):
+    """
+    Classify each spot into a discrete spot type via Leiden clustering on the
+    transcriptomic PCA embedding.
+
+    The clustering is performed on the pre-processed (normalised + log1p)
+    expression matrix stored in ``adata.X``.  Only HVGs should have been
+    selected *before* calling this function so that the PCA is meaningful.
+
+    Parameters
+    ----------
+    adata : AnnData
+        Must contain log-normalised counts in ``adata.X``.
+    n_pcs : int
+        Number of principal components to compute and use for neighbour graph.
+    n_neighbors : int
+        Number of neighbours for the kNN graph used by Leiden.
+    resolution : float
+        Leiden resolution; higher values produce more (finer) clusters.
+    verbose : bool
+        Whether to print cluster statistics.
+
+    Returns
+    -------
+    spot_type_ids : np.ndarray, shape (n_obs,), dtype int
+        Integer cluster label for every spot (0-indexed).
+    n_types : int
+        Total number of unique spot types found.
+    """
+    sc.pp.pca(adata, n_comps=n_pcs)
+    sc.pp.neighbors(adata, n_neighbors=n_neighbors, n_pcs=n_pcs)
+    sc.tl.leiden(adata, resolution=resolution, key_added='spot_type')
+
+    # Map string cluster labels ("0", "1", ...) to integers.
+    spot_type_ids = adata.obs['spot_type'].astype(int).values
+    n_types = int(spot_type_ids.max()) + 1
+
+    if verbose:
+        counts = np.bincount(spot_type_ids)
+        print(f'  Spot-type clustering: {n_types} types  '
+              f'(sizes: {counts.tolist()})')
+
+    return spot_type_ids, n_types
+
+
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True):
     """
@@ -139,11 +184,48 @@ class SMA(object):
         self.rna_mask =  rna_highly_variable_list[0] & rna_highly_variable_list[1] & rna_highly_variable_list[2]
         self.msi_mask = msi_highly_variable_list[0] & msi_highly_variable_list[1] & msi_highly_variable_list[2]
 
-        self.training = self._process_data(rna_adata_list[0:2], msi_adata_list[0:2], training_slides)         #前两个切片
-        self.testing = self._process_data(rna_adata_list[2:], msi_adata_list[2:], testing_slides)             #测试用切片
+        # ── Spot-type classification ──────────────────────────────────────────
+        # Run Leiden clustering on each slice independently (using only HVGs).
+        # We then collect spot_type arrays alongside the per-slice AnnData so
+        # that _process_data can attach the integer label to every sample tuple.
+        # All slices share the same cluster ID space because Leiden produces
+        # comparable cluster labels when the same resolution is used and the
+        # feature space is identical (common HVGs).  A global label remapping
+        # is performed below to guarantee contiguous IDs across slices.
+
+        all_spot_type_ids = {}   # key: "slide/row_col" -> int spot_type_id
+
+        n_types_per_slide = []
+        for idx, slide in enumerate(training_slides + testing_slides):
+            adata_rna = rna_adata_list[idx]
+            # Work on HVG-filtered copy so PCA is computed on the same genes
+            # that will be used for training.
+            adata_hvg = adata_rna[:, self.rna_mask].copy()
+            type_ids, n_t = assign_spot_types(adata_hvg, verbose=True)
+            n_types_per_slide.append(n_t)
+
+            array_row = adata_rna.obs['array_row'].values
+            array_col = adata_rna.obs['array_col'].values
+            for i in range(adata_rna.shape[0]):
+                coord_key = str(int(array_row[i])) + '_' + str(int(array_col[i]))
+                all_spot_type_ids[slide + '/' + coord_key] = int(type_ids[i])
+
+        # The maximum cluster ID across all slices determines the vocabulary size.
+        self.n_spot_types = max(n_types_per_slide)
+        print(f'  Total spot types used for embedding: {self.n_spot_types}')
+
+        self.training = self._process_data(
+            rna_adata_list[0:2], msi_adata_list[0:2],
+            training_slides, all_spot_type_ids)
+        self.testing = self._process_data(
+            rna_adata_list[2:], msi_adata_list[2:],
+            testing_slides, all_spot_type_ids)
 
         self.rna_length = (self.rna_mask * 1).sum()
         self.msi_length = (self.msi_mask * 1).sum()
+        # Aliases expected by the training script.
+        self.source_length = int(self.rna_length)
+        self.target_length = int(self.msi_length)
         # source_panel/target_panel 保存模型真实使用的输入基因名和输出代谢物名，
         # 训练后的可视化和 attribution 分析都会依赖这两个索引。
         self.target_panel = adata_msi.var['metabolism'].values[self.msi_mask].tolist()  #[i for i in range(self.msi_length)]
@@ -180,7 +262,16 @@ class SMA(object):
         return dictionary
 
         
-    def _process_data(self, rna_adata_list, msi_adata_list, names):
+    def _process_data(self, rna_adata_list, msi_adata_list, names, all_spot_type_ids):
+        """Build the list of per-spot sample tuples.
+
+        Each element is::
+
+            (img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors,
+             spot_type_id, sample_id)
+
+        ``spot_type_id`` is an int in ``[0, n_spot_types)``.
+        """
 
         dataset = []
 
@@ -192,7 +283,7 @@ class SMA(object):
             rna_dic = self._dictionary_data(rna_temp_adata, rna=True)
             msi_dic = self._dictionary_data(msi_temp_adata)
 
-            # graph = Cal_Spatial_Net_spatial_cite_seq(rna_temp_adata,  k_cutoff=8, model='KNN')  
+            # graph = Cal_Spatial_Net_spatial_cite_seq(rna_temp_adata,  k_cutoff=8, model='KNN')
             graph_1 = Cal_Spatial_Net_row_col(rna_temp_adata,  rad_cutoff=2**(1/2), model='Radius')    #为什么是根号2？这样不是会选到一共8个细胞吗？
             graph_2 = Cal_Spatial_Net_row_col(rna_temp_adata,  rad_cutoff=2, model='Radius')
 
@@ -215,13 +306,19 @@ class SMA(object):
                         # 每个空间位置还会关联一张 histology patch，形成图像 + 组学联合输入。
                         img_path = os.path.join(self.path_img, names[i], key + '.png')
 
+                        # Retrieve the integer spot-type label for this spot.
+                        # Fall back to type 0 when the coordinate is absent
+                        # (e.g. spots filtered during QC after clustering).
+                        global_key = names[i] + '/' + key
+                        spot_type_id = all_spot_type_ids.get(global_key, 0)
+
                         rna_neighbors, msi_neighbors = [], []
 
                         neighbors_1, neighbors_2 = graph_1[key], graph_2[key]
                         # 第二圈邻居去掉已被第一圈覆盖的点，避免重复。
                         neighbors_2 = [item for item in neighbors_2 if item not in neighbors_1]
 
-                        # connect to the first round 
+                        # connect to the first round
                         for j in neighbors_1:
                             # 邻居缺失时补零向量，保持固定输入维度。
                             if j not in rna_keys:
@@ -260,11 +357,13 @@ class SMA(object):
                                 msi_neighbors.append(np.zeros_like(msi_temp))
 
                         # 最终一个样本由：
-                        # 中心图像 + 中心 RNA + 中心 MSI + 8 个 RNA 邻居 + 8 个 MSI 邻居 + sample id 组成。
+                        # 中心图像 + 中心 RNA + 中心 MSI + 8 个 RNA 邻居 + 8 个 MSI 邻居
+                        # + spot_type_id + sample id 组成。
                         rna_neighbors = np.stack(rna_neighbors)
                         msi_neighbors = np.stack(msi_neighbors)
 
-                        dataset.append((img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors, names[i] + '/' + key))
+                        dataset.append((img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors,
+                                        spot_type_id, names[i] + '/' + key))
 
         return dataset
 
