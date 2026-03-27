@@ -38,6 +38,18 @@ def generate_args():
                         help="run evaluation for every N epochs (set to -1 to test after training)")
     parser.add_argument('--gpu-devices', default='0', type=str, help='gpu device ids for CUDA_VISIBLE_DEVICES')
 
+    # GNN context encoder options (active when --context_model_type gnn)
+    parser.add_argument('--context_model_type', default='transformer', type=str,
+                        choices=['transformer', 'gnn'],
+                        help="Context encoder: 'transformer' (original) or 'gnn' (GraphSAGE)")
+    parser.add_argument('--gnn_num_layers', default=2, type=int,
+                        help='Number of GraphSAGE layers (default 2)')
+    parser.add_argument('--gnn_hidden_dim', default=None, type=int,
+                        help='GNN hidden dim (None = use fea_size=256)')
+    parser.add_argument('--gnn_graph_type', default='full', type=str,
+                        choices=['full', 'star'],
+                        help="Niche graph topology: 'full' (all-to-all) or 'star' (center hub)")
+
     args = parser.parse_args()
 
     return args

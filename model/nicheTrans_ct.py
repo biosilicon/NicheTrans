@@ -6,6 +6,7 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.gnn_niche_encoder import GNNNicheEncoder
 
 
 class NetBlock(nn.Module):
@@ -47,11 +48,23 @@ class NetBlock(nn.Module):
 
 class NicheTrans_ct(nn.Module):
     # def __init__(self, rna_length=877, msi_length=137):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(
+        self,
+        source_length=877,
+        target_length=137,
+        noise_rate=0.2,
+        dropout_rate=0.1,
+        # --- context encoder switch ---
+        context_model_type='transformer',   # 'transformer' | 'gnn'
+        gnn_num_layers=2,
+        gnn_hidden_dim=None,
+        gnn_graph_type='full',
+    ):
         super(NicheTrans_ct, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.context_model_type = context_model_type
 
         self.fea_size, self.img_size = 256, 256
 
@@ -61,12 +74,29 @@ class NicheTrans_ct(nn.Module):
                                             nn.LayerNorm(256),
                                             nn.ReLU(inplace=True))
 
-        self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
-        self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
+        ###############
+        # context / neighborhood encoder (Transformer OR GNN)
+        if context_model_type == 'transformer':
+            self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
+            self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
+            self.ln1 = nn.LayerNorm(self.fea_size)
+            self.ln2 = nn.LayerNorm(self.fea_size)
+        elif context_model_type == 'gnn':
+            # GNN replaces the Transformer block.  Cell-type tokens are added
+            # before the context encoder, same as the Transformer path.
+            self.gnn_encoder = GNNNicheEncoder(
+                in_dim=self.fea_size,
+                hidden_dim=gnn_hidden_dim or self.fea_size,
+                num_layers=gnn_num_layers,
+                dropout=self.dropout_rate,
+                graph_type=gnn_graph_type,
+            )
+        else:
+            raise ValueError(
+                f"context_model_type must be 'transformer' or 'gnn', "
+                f"got '{context_model_type}'"
+            )
 
-        self.ln1 = nn.LayerNorm(self.fea_size)
-        self.ln2 = nn.LayerNorm(self.fea_size)
-        
         ################
         self.dropout = nn.Dropout(self.dropout_rate)
 
@@ -94,10 +124,14 @@ class NicheTrans_ct(nn.Module):
         trunc_normal_(self.token_center, std=.02)
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
-       
+
     def forward(self, source, source_neighbor, cell_inf):
+        # source:          [b, source_length]
+        # source_neighbor: [b, l, source_length]   l = 12 for STARmap PLUS
+        # cell_inf:        [b, 1+l, 13]  — one-hot-like cell type for all nodes
         b = source.size(0)
 
+        # Cell-type tokens fused into node features (unchanged)
         classes_tokens = (self.cell_tokens * cell_inf.unsqueeze(dim=-1)).sum(-2)
 
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 6, 1), self.token_neigh_2.repeat(1, 6, 1)], dim=1)
@@ -105,15 +139,23 @@ class NicheTrans_ct(nn.Module):
         source = source[:, None, :]
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
-        # genome feature extraction, be aware that we add on the features
-        f_omic = self.encoder_rna(omic_data).view(b, -1, self.fea_size) 
+        # Omics feature extraction: [b, 1+l, fea_size]
+        f_omic = self.encoder_rna(omic_data).view(b, -1, self.fea_size)
+        # Add spatial + cell-type role information (unchanged)
         f_omic = f_omic + spatial_tokens + classes_tokens
 
         f_omic = self.projection_rna(f_omic)
 
-        f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        # --- Context encoder: Transformer or GNN ---
+        if self.context_model_type == 'transformer':
+            f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
+            f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        else:  # 'gnn'
+            # f_omic: [b, 1+l, fea_size]  →  [b, 1+l, hidden_dim]
+            # Node 0 = center cell (convention preserved).
+            f_omic = self.gnn_encoder(f_omic)
 
+        # Extract center-node representation (index 0, unchanged)
         f_omic = f_omic[:, 0, :]
         f = self.dropout(f_omic)
 

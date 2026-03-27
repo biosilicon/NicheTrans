@@ -6,14 +6,27 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.gnn_niche_encoder import GNNNicheEncoder
 
 
 class NicheTrans_img(nn.Module):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(
+        self,
+        source_length=877,
+        target_length=137,
+        noise_rate=0.2,
+        dropout_rate=0.1,
+        # --- context encoder switch ---
+        context_model_type='transformer',   # 'transformer' | 'gnn'
+        gnn_num_layers=2,
+        gnn_hidden_dim=None,
+        gnn_graph_type='full',
+    ):
         super(NicheTrans_img, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.context_model_type = context_model_type
 
         self.fea_size, self.img_size = 256, 128
 
@@ -32,14 +45,31 @@ class NicheTrans_img(nn.Module):
         # omics encoder
         self.encoder = NetBlock(nlayer=2, dim_list=[source_length, 512, self.fea_size], dropout_rate=self.dropout_rate, noise_rate=self.noise_rate)
 
-        self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
-        self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
-    
-        self.ln1 = nn.LayerNorm(self.fea_size)
-        self.ln2 = nn.LayerNorm(self.fea_size)
+        ###############
+        # context / neighborhood encoder (Transformer OR GNN)
+        if context_model_type == 'transformer':
+            self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
+            self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
+            self.ln1 = nn.LayerNorm(self.fea_size)
+            self.ln2 = nn.LayerNorm(self.fea_size)
+        elif context_model_type == 'gnn':
+            # GNN replaces the Transformer block.  Image branch is unchanged.
+            # After GNN, f_omic[:, 0, :] is concatenated with f_img as before.
+            self.gnn_encoder = GNNNicheEncoder(
+                in_dim=self.fea_size,
+                hidden_dim=gnn_hidden_dim or self.fea_size,
+                num_layers=gnn_num_layers,
+                dropout=self.dropout_rate,
+                graph_type=gnn_graph_type,
+            )
+        else:
+            raise ValueError(
+                f"context_model_type must be 'transformer' or 'gnn', "
+                f"got '{context_model_type}'"
+            )
 
         ##############
-        # prediction layers
+        # prediction layers — fea_size + img_size as before
         predict_net = []
         for _ in range(target_length):
             predict_net.append(
@@ -55,10 +85,9 @@ class NicheTrans_img(nn.Module):
         self.non_linear = nn.Sequential(nn.Linear(256, 256),
                                         nn.LayerNorm(256),
                                         nn.LeakyReLU())
-        
+
         self.dropout = nn.Dropout(self.dropout_rate)
         self.dropout_5 = nn.Dropout(0.5)
-        ################
 
         ################
         # initialize tokens for semantic embedding
@@ -69,9 +98,11 @@ class NicheTrans_img(nn.Module):
         trunc_normal_(self.token_center, std=.02)
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
-        ################
 
     def forward(self, img, source, source_neighbor):
+        # source:          [b, source_length]
+        # source_neighbor: [b, 8, source_length]
+        # img:             [b, C, H, W]  — H&E patch for center spot
         b = img.size(0)
 
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 4, 1), self.token_neigh_2.repeat(1, 4, 1)], dim=1)
@@ -79,21 +110,29 @@ class NicheTrans_img(nn.Module):
         source = source[:, None, :]
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
-        # genome feature extraction, be aware that we add on the features
-        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size) 
+        # Omics feature extraction: [b, 1+8, fea_size]
+        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size)
         f_omic = f_omic + spatial_tokens
 
         f_omic = self.non_linear(f_omic)
 
-        f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
-        
-        # image feature extraction
+        # --- Context encoder: Transformer or GNN ---
+        if self.context_model_type == 'transformer':
+            f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
+            f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        else:  # 'gnn'
+            # f_omic: [b, 1+8, fea_size]  →  [b, 1+8, hidden_dim]
+            # Node 0 = center spot (convention preserved).
+            f_omic = self.gnn_encoder(f_omic)
+
+        # Image feature extraction (unchanged)
         f_img = self.pooling(self.base(img)).squeeze()
         f_img = self.dropout_5(f_img)
         f_img = self.img(f_img)
 
-        f = torch.cat([f_omic[:, 0, :], f_img], dim=1) 
+        # Fuse center-node omics repr + image repr (unchanged)
+        # f_omic[:, 0, :]: [b, fea_size]   f_img: [b, img_size]
+        f = torch.cat([f_omic[:, 0, :], f_img], dim=1)
         f = self.dropout(f)
 
         # final prediction
@@ -103,3 +142,4 @@ class NicheTrans_img(nn.Module):
         out = torch.cat(out, dim=1)
 
         return out
+

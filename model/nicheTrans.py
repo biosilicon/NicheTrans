@@ -5,6 +5,7 @@ import torchvision
 from torch import nn
 
 from model.attention import *
+from model.gnn_niche_encoder import GNNNicheEncoder
 
 
 class NetBlock(nn.Module):
@@ -41,11 +42,23 @@ class NetBlock(nn.Module):
 
 # NicheTrans with spatial information only
 class NicheTrans(nn.Module):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(
+        self,
+        source_length=877,
+        target_length=137,
+        noise_rate=0.2,
+        dropout_rate=0.1,
+        # --- context encoder switch ---
+        context_model_type='transformer',   # 'transformer' | 'gnn'
+        gnn_num_layers=2,                   # GNN: number of GraphSAGE layers
+        gnn_hidden_dim=None,                # GNN: hidden dim (None → use fea_size)
+        gnn_graph_type='full',              # GNN: 'full' (all-to-all) | 'star'
+    ):
         super(NicheTrans, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.context_model_type = context_model_type
 
         self.fea_size, self.img_size = 256, 128
 
@@ -53,11 +66,29 @@ class NicheTrans(nn.Module):
         # omics encoder
         self.encoder = NetBlock(nlayer=2, dim_list=[source_length, 512, self.fea_size], dropout_rate=self.dropout_rate, noise_rate=self.noise_rate)
 
-        self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
-        self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
-    
-        self.ln1 = nn.LayerNorm(self.fea_size)
-        self.ln2 = nn.LayerNorm(self.fea_size)
+        ###############
+        # context / neighborhood encoder (Transformer OR GNN)
+        if context_model_type == 'transformer':
+            self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
+            self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
+            self.ln1 = nn.LayerNorm(self.fea_size)
+            self.ln2 = nn.LayerNorm(self.fea_size)
+        elif context_model_type == 'gnn':
+            # GNN encoder: same in/out shape as the Transformer block above.
+            # in_dim = fea_size (output of omics encoder + spatial tokens)
+            # out[:, 0, :] is used for prediction (center node, index 0).
+            self.gnn_encoder = GNNNicheEncoder(
+                in_dim=self.fea_size,
+                hidden_dim=gnn_hidden_dim or self.fea_size,
+                num_layers=gnn_num_layers,
+                dropout=self.dropout_rate,
+                graph_type=gnn_graph_type,
+            )
+        else:
+            raise ValueError(
+                f"context_model_type must be 'transformer' or 'gnn', "
+                f"got '{context_model_type}'"
+            )
 
         ##############
         # prediction layers
@@ -92,42 +123,49 @@ class NicheTrans(nn.Module):
 
 
     def forward(self, source, source_neighbor):
-        # 当前 batch 大小，即中心细胞/spot 的数量。
+        # source:          [b, source_length]       — center cell omics
+        # source_neighbor: [b, l, source_length]    — l neighbor omics
         b = source.size(0)
-        # 邻居 token 数量，通常对应每个中心位置拼接进来的邻域样本数。
         l = source_neighbor.size(1)
-        # 为中心位置和两类邻居位置构造可学习的空间 token，
-        # 其长度需要与后续拼接后的 token 序列长度一致。
+
+        # Learnable spatial role tokens: [1, 1+l, fea_size]
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, l//2, 1), self.token_neigh_2.repeat(1, l//2, 1)], dim=1)
 
-        # 给中心样本增加一个 token 维度，形状从 [b, source_length] 变为 [b, 1, source_length]。
+        # Stack center + neighbors, flatten for shared encoder.
+        # Shape: [b*(1+l), source_length]
         source = source[:, None, :]
-        # 将中心样本与邻居样本在 token 维拼接，再展平成二维张量，变成 [(b*(1+l)), source_length]
-        # 以便共享同一个 encoder 对每个 token 的组学特征做编码。
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
 
-        # 提取每个 token 的组学特征，再恢复成 [b, token_num, fea_size]。
-        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size) 
-        # 将可学习的空间 token 加到组学特征上，把空间角色信息注入表示中。
+        # Encode each token independently: [b, 1+l, fea_size]
+        f_omic = self.encoder(omic_data).view(b, -1, self.fea_size)
+        # Inject spatial role information.
         f_omic = f_omic + spatial_tokens
 
-        # 经过一层非线性映射，进一步融合和变换特征。
+        # Non-linear projection (shared by both paths).
         f_omic = self.non_linear(f_omic)
 
-        # 自注意力残差块：先 LayerNorm，再做 token 间信息交互，最后与输入残差相加。
-        f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        # 前馈网络残差块：对每个 token 的表示逐位置变换，并保留残差连接。
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        # --- Context encoder: Transformer or GNN ---
+        if self.context_model_type == 'transformer':
+            # Original Transformer path (self-attention + FFN with residuals).
+            # f_omic: [b, 1+l, fea_size]
+            f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
+            f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        else:  # 'gnn'
+            # GNN path: build local niche graph, run GraphSAGE message passing.
+            # f_omic: [b, 1+l, fea_size]  →  [b, 1+l, hidden_dim]
+            # Node 0 is still the center cell (convention preserved).
+            f_omic = self.gnn_encoder(f_omic)
 
-        # 仅取第 0 个 token（中心位置）的表示做最终预测，并施加 dropout。
+        # Extract center-node representation (index 0, same as original).
+        # f_omic[:, 0, :]: [b, fea_size]
         f = self.dropout(f_omic[:, 0, :])
 
-        # 为每个目标基因/输出维度使用一个独立的预测头。
+        # Per-target prediction heads.
         out = []
         for i in range(self.target_length):
             out.append(self.predict_layers[i](f))
-        # 将所有单维预测结果拼接成最终输出 [b, target_length]。
+        # Output: [b, target_length]
         out = torch.cat(out, dim=1)
 
         return out
-    
+
