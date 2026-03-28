@@ -1,19 +1,24 @@
 import torch
+import time
 import numpy as np
 
 from PIL import Image
 from torch.utils.data import Dataset
 
 def read_image(img_path):
-    got_img = False
-    while not got_img:
+    max_retries = 10
+    for attempt in range(max_retries):
         try:
             img = Image.open(img_path).convert('RGB')
-            got_img = True
+            return img
         except IOError:
-            print("IOError incurred when reading '{}'. Will redo. Don't worry. Just chill.".format(img_path))
-            pass
-    return img
+            if attempt < max_retries - 1:
+                print("IOError incurred when reading '{}'. Retry {}/{}".format(
+                    img_path, attempt + 1, max_retries))
+                time.sleep(0.1 * (2 ** attempt))
+            else:
+                raise IOError("Failed to read '{}' after {} attempts".format(
+                    img_path, max_retries))
 
 
 class SMA_loader(Dataset):

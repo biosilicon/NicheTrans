@@ -9,7 +9,10 @@ def train(model, criterion, optimizer, trainloader, use_img=True, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
-    model.train()     #nn.Module内置方法 将模型切换到训练模式
+    use_amp = device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
+    model.train()
     losses = AverageMeter()
 
     for batch_idx, (imgs, source, target, source_neightbors, _, _) in enumerate(trainloader):
@@ -17,22 +20,26 @@ def train(model, criterion, optimizer, trainloader, use_img=True, device=None):
         source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
         ############
         if random.random() > 0.7:
-            mask = torch.ones((source_neightbors.size(0), 8, 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
+            mask = torch.bernoulli(torch.full(
+                (source_neightbors.size(0), 8, 1), 0.5, device=source_neightbors.device))
             source_neightbors = source_neightbors * mask
         ############
 
-        if use_img == True:
-            imgs = imgs.to(device)
-            outputs = model(imgs, source, source_neightbors)
-        else:
-            outputs = model(source, source_neightbors)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            if use_img == True:
+                imgs = imgs.to(device)
+                outputs = model(imgs, source, source_neightbors)
+            else:
+                outputs = model(source, source_neightbors)
 
-        loss = criterion(outputs, target)
+            loss = criterion(outputs, target)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         losses.update(loss.data, imgs.size(0))
 
         if (batch_idx+1) == len(trainloader):
@@ -43,6 +50,7 @@ def test(model, testloader, use_img=True, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+    use_amp = device.type == 'cuda'
     model.eval()
 
     predict_list, target_list = [], []
@@ -53,11 +61,12 @@ def test(model, testloader, use_img=True, device=None):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
 
-            if use_img == True:
-                imgs = imgs.to(device)
-                outputs = model(imgs, source, source_neightbors)
-            else:
-                outputs = model(source, source_neightbors)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                if use_img == True:
+                    imgs = imgs.to(device)
+                    outputs = model(imgs, source, source_neightbors)
+                else:
+                    outputs = model(source, source_neightbors)
 
             predict_list.append(outputs)
             target_list.append(target)

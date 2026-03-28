@@ -19,7 +19,7 @@ class NicheTrans_img(nn.Module):
 
         ###########
         # image encoder
-        resnet = torchvision.models.resnet18(pretrained=True)
+        resnet = torchvision.models.resnet18(weights=torchvision.models.ResNet18_Weights.DEFAULT)
         self.base = nn.Sequential(*list(resnet.children())[:-2])
 
         self.img = nn.Sequential(nn.Linear(512, self.img_size),

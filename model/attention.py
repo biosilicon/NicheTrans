@@ -4,6 +4,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn, einsum
 
+_HAS_SDPA = hasattr(F, 'scaled_dot_product_attention')
+
 
 def exists(val):
     return val is not None
@@ -53,6 +55,7 @@ class Self_Attention(nn.Module):
         inner_dim = dim_head * heads
         self.scale = dim_head ** -0.5
         self.heads = heads
+        self.dim_head = dim_head
 
         self.to_q = nn.Sequential(nn.Linear(query_dim, inner_dim, bias=False))
         self.to_k = nn.Sequential(nn.Linear(context_dim, inner_dim, bias=False))
@@ -60,20 +63,31 @@ class Self_Attention(nn.Module):
         self.to_out = nn.Linear(inner_dim, inner_dim)
 
         self.dropout = nn.Dropout(dropout)
+        self._dropout_p = dropout
 
     def forward(self, x1, mask=None):
         h = self.heads
 
         q = self.to_q(x1)
         k, v = self.to_k(x1), self.to_v(x1)
-        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> (b h) n d', h=h), (q, k, v))
 
-        sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
-        attn = sim.softmax(dim=-1)
-        attn = self.dropout(attn)
+        # Reshape to (B, heads, N, dim_head) for both SDPA and fallback paths
+        q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=h), (q, k, v))
 
-        out = einsum('b i j, b j d -> b i d', attn, v)
-        out = rearrange(out, '(b h) n d -> b n (h d)', h=h)
+        if _HAS_SDPA:
+            # Use PyTorch native scaled dot-product attention (FlashAttention / memory-efficient)
+            dropout_p = self._dropout_p if self.training else 0.0
+            out = F.scaled_dot_product_attention(q, k, v, dropout_p=dropout_p)
+        else:
+            # Fallback for PyTorch < 2.0
+            q, k, v = map(lambda t: rearrange(t, 'b h n d -> (b h) n d'), (q, k, v))
+            sim = einsum('b i d, b j d -> b i j', q, k) * self.scale
+            attn = sim.softmax(dim=-1)
+            attn = self.dropout(attn)
+            out = einsum('b i j, b j d -> b i d', attn, v)
+            out = rearrange(out, '(b h) n d -> b h n d', h=h)
+
+        out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
 

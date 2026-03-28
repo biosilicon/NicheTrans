@@ -12,6 +12,10 @@ from sklearn.metrics import roc_auc_score, confusion_matrix
 def train(model, criterion, optimizer, trainloader, ct_information=False, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
     model.train()
     losses = AverageMeter()
     for batch_idx, (rna, protein, cell, rna_neighbors, cell_neighbor, _) in enumerate(trainloader):
@@ -21,8 +25,8 @@ def train(model, criterion, optimizer, trainloader, ct_information=False, device
 
         ############
         if random.random() > 0.7:
-            mask = torch.ones((rna_neighbors.size(0), rna_neighbors.size(1), 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
+            mask = torch.bernoulli(torch.full(
+                (rna_neighbors.size(0), rna_neighbors.size(1), 1), 0.5, device=rna_neighbors.device))
             rna_neighbors = rna_neighbors * mask
             cell_neighbor = cell_neighbor * mask
         ############
@@ -30,17 +34,21 @@ def train(model, criterion, optimizer, trainloader, ct_information=False, device
         cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1)
         source, target, source_neightbors = rna, protein, rna_neighbors
 
-        if ct_information == True:
-            outputs = model(source, source_neightbors, cell_inf)
-        else:
-            outputs = model(source, source_neightbors)
-        outputs = torch.sigmoid(outputs)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            if ct_information == True:
+                outputs = model(source, source_neightbors, cell_inf)
+            else:
+                outputs = model(source, source_neightbors)
+            outputs = torch.sigmoid(outputs)
 
-        loss = criterion(outputs, target)
+            loss = criterion(outputs, target)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         losses.update(loss.data, source.size(0))
 
         if (batch_idx+1) == len(trainloader):
@@ -50,6 +58,8 @@ def train(model, criterion, optimizer, trainloader, ct_information=False, device
 def test(model, testloader, ct_information=False, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
     model.eval()
 
     predict_list, target_list = [], []
@@ -60,11 +70,12 @@ def test(model, testloader, ct_information=False, device=None):
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
             cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1).to(device)
 
-            if ct_information == True:
-                outputs = model(source, source_neightbors, cell_inf)
-            else:
-                outputs = model(source, source_neightbors)
-            outputs = torch.sigmoid(outputs)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                if ct_information == True:
+                    outputs = model(source, source_neightbors, cell_inf)
+                else:
+                    outputs = model(source, source_neightbors)
+                outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)
             target_list.append(target)

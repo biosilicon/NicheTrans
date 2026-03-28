@@ -11,6 +11,10 @@ from sklearn.metrics import roc_auc_score
 def train_regression(model, criterion, optimizer, trainloader, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
     model.train()
     losses = AverageMeter()
 
@@ -20,17 +24,21 @@ def train_regression(model, criterion, optimizer, trainloader, device=None):
 
         ############
         if random.random() > 0.7:
-            mask = torch.ones((source_neighbors.size(0), 8, 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
+            mask = torch.bernoulli(torch.full(
+                (source_neighbors.size(0), 8, 1), 0.5, device=source_neighbors.device))
             source_neighbors = source_neighbors * mask
         ############
 
-        outputs = model(source, source_neighbors)
-        loss = criterion(outputs, target)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            outputs = model(source, source_neighbors)
+            loss = criterion(outputs, target)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         losses.update(loss.data, source.size(0))
 
         if (batch_idx+1) == len(trainloader):
@@ -40,6 +48,10 @@ def train_regression(model, criterion, optimizer, trainloader, device=None):
 def train_binary(model, criterion, optimizer, trainloader, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
+    scaler = torch.amp.GradScaler('cuda', enabled=use_amp)
+
     model.train()
     losses = AverageMeter()
 
@@ -49,18 +61,22 @@ def train_binary(model, criterion, optimizer, trainloader, device=None):
 
         ############
         if random.random() > 0.7:
-            mask = torch.ones((source_neighbors.size(0), 8, 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
+            mask = torch.bernoulli(torch.full(
+                (source_neighbors.size(0), 8, 1), 0.5, device=source_neighbors.device))
             source_neighbors = source_neighbors * mask
         ############
 
-        outputs = model(source, source_neighbors)
-        outputs = torch.sigmoid(outputs)
-        loss = criterion(outputs, target)
+        optimizer.zero_grad(set_to_none=True)
+        with torch.amp.autocast('cuda', enabled=use_amp):
+            outputs = model(source, source_neighbors)
+            outputs = torch.sigmoid(outputs)
+            loss = criterion(outputs, target)
 
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        scaler.step(optimizer)
+        scaler.update()
         losses.update(loss.data, source.size(0))
 
         if (batch_idx+1) == len(trainloader):
@@ -71,19 +87,22 @@ def train_binary(model, criterion, optimizer, trainloader, device=None):
 def test_regression(model, testloader, if_sigmoid=False, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
     model.eval()
 
     predict_list, target_list = [], []
-
 
     with torch.no_grad():
         for _, (source, target, source_neightbors, _) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
 
-            if if_sigmoid:
-                outputs = torch.sigmoid(outputs)
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                outputs = model(source, source_neightbors)
+
+                if if_sigmoid:
+                    outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)
             target_list.append(target)
@@ -99,17 +118,20 @@ def test_regression(model, testloader, if_sigmoid=False, device=None):
 def test_binary(model, testloader, device=None):
     if device is None:
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    use_amp = device.type == 'cuda'
     model.eval()
 
     predict_list, target_list = [], []
-
 
     with torch.no_grad():
         for _, (source, target, source_neightbors, _) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
-            outputs = torch.sigmoid(outputs)
+
+            with torch.amp.autocast('cuda', enabled=use_amp):
+                outputs = model(source, source_neightbors)
+                outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)
             target_list.append(target)
