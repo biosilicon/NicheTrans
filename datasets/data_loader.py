@@ -87,11 +87,17 @@ class AD_Mouse_loader(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        
-        rna, protein, cell, rna_neighbor, cell_neighbor, sample = self.dataset[index]
-        rna, protein, cell, rna_neighbor, cell_neighbor = torch.Tensor(rna), torch.Tensor(protein), torch.Tensor(cell), torch.Tensor(rna_neighbor), torch.Tensor(cell_neighbor)
+        rna, protein, cell, rna_neighbor, cell_neighbor, spot_type_id, sample = self.dataset[index]
+        rna       = torch.Tensor(rna)
+        protein   = torch.Tensor(protein)
+        cell      = torch.Tensor(cell)
+        rna_neighbor  = torch.Tensor(rna_neighbor)
+        cell_neighbor = torch.Tensor(cell_neighbor)
+        # spot_type_id is the integer cell-type label used to look up the
+        # per-type learnable spatial center token inside the model.
+        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
 
-        return rna, protein, cell, rna_neighbor, cell_neighbor, sample
+        return rna, protein, cell, rna_neighbor, cell_neighbor, spot_type_id, sample
 
 
 class Embryonic_mouse_brain(Dataset):

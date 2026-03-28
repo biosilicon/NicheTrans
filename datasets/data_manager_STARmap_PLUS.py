@@ -85,8 +85,15 @@ class AD_Mouse(object):
                 sc.pp.highly_variable_genes(adata_temp, flavor="seurat_v3", n_top_genes=n_top_genes)
             adata_list.append(adata_temp)
 
-        self.rna_mask = adata_list[0].var['highly_variable'].values & adata_list[1].var['highly_variable'].values 
+        self.rna_mask = adata_list[0].var['highly_variable'].values & adata_list[1].var['highly_variable'].values
+        # cell_mask: sorted array of cell-type label strings common to all training slides.
+        # The position of each label in this array is its integer spot_type_id.
         self.cell_mask = np.array( sorted( set(adata_list[0].obs[self.cell_type].values) & set(adata_list[1].obs[self.cell_type].values)))
+        # Map cell-type string → integer ID (0-indexed position in cell_mask).
+        # Used by _process_data to attach a compact integer label to every spot,
+        # which the model uses to look up a per-type learnable spatial center token.
+        self.cell_type_to_id = {ct: i for i, ct in enumerate(self.cell_mask)}
+        self.n_spot_types = len(self.cell_mask)
 
         val_adata = [sc.read_h5ad( os.path.join(Wild_type_adata_path, 'spatial_13months-control-replicate_1.h5ad'))]
         val_slides = ['spatial_13months-control-replicate_1.h5ad']
@@ -98,10 +105,11 @@ class AD_Mouse(object):
         self.graph = graph
 
         self.rna_length = self.rna_mask.sum()
+        self.source_length = int(self.rna_length)   # alias expected by training scripts
         self.target_length = 2
         self.target_panel = np.array(['tau', 'plaque'])
         self.source_panel = adata_temp.var_names[self.rna_mask]
-       
+
         num_training_spots = len(self.training)
         num_testing_spots = len(self.testing)
 
@@ -113,9 +121,24 @@ class AD_Mouse(object):
         print("  train    |  {:5d} spots, {} positive tao, {} positive plaque ".format(num_training_spots, training_tau, training_Aβ))
         print("  test     |  {:5d} spots, {} positive tao, {} positive plaque ".format(num_testing_spots, testing_tau, testing_Aβ))
         print("  ------------------------------")
+        print(f"  Cell types (spot types): {self.n_spot_types} — {self.cell_mask.tolist()}")
 
 
     def _process_data(self, adata_list, slides, WT=False):
+        """Build per-spot sample tuples.
+
+        Each element is::
+
+            (rna, protein, cell_onehot, rna_neighbor, cell_neighbor,
+             spot_type_id, sample_id)
+
+        ``cell_onehot`` is the existing one-hot cell-type vector (kept for
+        backward compatibility with NicheTrans_ct).
+        ``spot_type_id`` is an int in ``[0, n_spot_types)`` derived from the
+        ``ct_top`` annotation — the integer position of the cell type in the
+        globally sorted ``cell_mask`` array.  Unknown types (e.g. those only
+        in WT slides) fall back to 0.
+        """
 
         tau, Aβ = 0, 0
         dataset = []
@@ -149,9 +172,14 @@ class AD_Mouse(object):
             for i in range(rna_adata.shape[0]):
                 rna_neighbor, cell_neighbor = [], []
 
-                cell = (cell_array[i] == self.cell_mask) * 1
+                cell_onehot = (cell_array[i] == self.cell_mask) * 1
                 rna, protein = rna_array[i], proteins[i]
                 index = indexes[i]
+
+                # Integer spot-type label derived from existing cell-type annotation.
+                # cell_type_to_id maps string labels from training slides; WT slides
+                # may have unseen types — those fall back to 0.
+                spot_type_id = self.cell_type_to_id.get(cell_array[i], 0)
 
                 for j in graph[index]:
                     rna_neighbor.append(dict_rna[j])
@@ -160,7 +188,8 @@ class AD_Mouse(object):
                 rna_neighbor = np.array(rna_neighbor)
                 cell_neighbor = np.array(cell_neighbor)
 
-                dataset.append((rna, protein, cell, rna_neighbor, cell_neighbor, slide + '/' + index))
+                dataset.append((rna, protein, cell_onehot, rna_neighbor, cell_neighbor,
+                                spot_type_id, slide + '/' + index))
 
         return dataset, tau, Aβ, graph
 
