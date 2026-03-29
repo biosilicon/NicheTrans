@@ -207,31 +207,42 @@ class Lymph_node(object):
                 spot_type_id = global_id_by_key[key]
 
                 rna_neighbors = []
+                neighbor1_spot_type_ids, neighbor2_spot_type_ids = [], []
                 neighbors_1, neighbors_2 = graph_1[key], graph_2[key]
                 neighbors_2 = [item for item in neighbors_2 if item not in neighbors_1]
 
                 for j in neighbors_1:
                     if j not in rna_keys:
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor1_spot_type_ids.append(-1)
                     else:
                         rna_neighbors.append(rna_dic[j])
+                        neighbor1_spot_type_ids.append(global_id_by_key.get(j, -1))
 
                 if len(neighbors_1) != 4:
                     for _ in range(4 - len(neighbors_1)):
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor1_spot_type_ids.append(-1)
 
                 for j in neighbors_2:
                     if j not in rna_keys:
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor2_spot_type_ids.append(-1)
                     else:
                         rna_neighbors.append(rna_dic[j])
+                        neighbor2_spot_type_ids.append(global_id_by_key.get(j, -1))
 
                 if len(neighbors_2) != 4:
                     for _ in range(4 - len(neighbors_2)):
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor2_spot_type_ids.append(-1)
 
                 rna_neighbors = np.stack(rna_neighbors)
-                dataset.append((rna_temp, protein_temp, rna_neighbors, spot_type_id, slide + '/' + key))
+                spot_type_ids = np.asarray(
+                    [spot_type_id] + neighbor1_spot_type_ids + neighbor2_spot_type_ids,
+                    dtype=np.int64,
+                )
+                dataset.append((rna_temp, protein_temp, rna_neighbors, spot_type_ids, slide + '/' + key))
 
         return dataset
 

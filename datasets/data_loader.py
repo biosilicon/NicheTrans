@@ -37,9 +37,9 @@ class SMA_loader(Dataset):
         rna_neighbors = torch.Tensor(rna_neighbors)
         msi_neighbors = torch.Tensor(msi_neighbors)
 
-        # spot_type_id is the final globally consistent cell-type ID used to
-        # select the per-type learnable spatial token inside the model.
-        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
+        # spot_type_id stores the center token ID followed by one ID per
+        # neighbor token. Padded/missing neighbors are marked as -1.
+        spot_type_id = torch.as_tensor(spot_type_id, dtype=torch.long)
 
         return img, rna_temp, msi_temp, rna_neighbors, msi_neighbors, spot_type_id, sample
 
@@ -75,7 +75,7 @@ class Lymph_node_celltype_loader(Dataset):
         rna_temp = torch.Tensor(rna_temp)
         protein_temp = torch.Tensor(protein_temp)
         rna_neighbors = torch.Tensor(rna_neighbors)
-        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
+        spot_type_id = torch.as_tensor(spot_type_id, dtype=torch.long)
 
         return rna_temp, protein_temp, rna_neighbors, spot_type_id, sample
 
@@ -112,9 +112,9 @@ class AD_Mouse_loader(Dataset):
         cell = torch.Tensor(cell)
         rna_neighbor = torch.Tensor(rna_neighbor)
         cell_neighbor = torch.Tensor(cell_neighbor)
-        # spot_type_id is the globally encoded cell-type label used to look up
-        # the per-type learnable spatial center token inside the model.
-        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
+        # spot_type_id stores the center token ID followed by one ID per
+        # neighbor token. Padded/missing neighbors are marked as -1.
+        spot_type_id = torch.as_tensor(spot_type_id, dtype=torch.long)
 
         return rna, protein, cell, rna_neighbor, cell_neighbor, spot_type_id, sample
 

@@ -176,12 +176,12 @@ class AD_Mouse(object):
         Each element is::
 
             (rna, protein, cell_onehot, rna_neighbor, cell_neighbor,
-             spot_type_id, sample_id)
+             spot_type_ids, sample_id)
 
         ``cell_onehot`` stores the one-hot encoding of the final
         ``global_cell_type_id`` for the center spot and its neighbors.
-        ``spot_type_id`` is that same global ID and is what the model uses
-        for the cell-type embedding lookup.
+        ``spot_type_ids`` stores the center global ID followed by one ID per
+        neighbor token, in the same order as ``rna_neighbor`` / ``cell_neighbor``.
         """
 
         tau, abeta = 0, 0
@@ -206,11 +206,13 @@ class AD_Mouse(object):
 
             dict_rna = {}
             dict_cell = {}
+            dict_spot_type = {}
             for i, obs_index in enumerate(indexes):
                 dict_rna[obs_index] = rna_array[i]
                 cell_onehot = np.zeros(self.n_cell_types, dtype=np.float32)
                 cell_onehot[int(global_cell_type_ids[i])] = 1.0
                 dict_cell[obs_index] = cell_onehot
+                dict_spot_type[obs_index] = int(global_cell_type_ids[i])
 
             for i in range(rna_adata.shape[0]):
                 rna_neighbor, cell_neighbor = [], []
@@ -219,13 +221,16 @@ class AD_Mouse(object):
                 cell_onehot = dict_cell[obs_index]
                 rna, protein = rna_array[i], proteins[i]
                 spot_type_id = int(global_cell_type_ids[i])
+                neighbor_spot_type_ids = []
 
                 for neighbor_index in graph[obs_index]:
                     rna_neighbor.append(dict_rna[neighbor_index])
                     cell_neighbor.append(dict_cell[neighbor_index])
+                    neighbor_spot_type_ids.append(dict_spot_type[neighbor_index])
 
                 rna_neighbor = np.array(rna_neighbor)
                 cell_neighbor = np.array(cell_neighbor)
+                spot_type_ids = np.asarray([spot_type_id] + neighbor_spot_type_ids, dtype=np.int64)
 
                 dataset.append((
                     rna,
@@ -233,7 +238,7 @@ class AD_Mouse(object):
                     cell_onehot,
                     rna_neighbor,
                     cell_neighbor,
-                    spot_type_id,
+                    spot_type_ids,
                     slide + '/' + obs_index,
                 ))
 

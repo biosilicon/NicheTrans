@@ -5,6 +5,7 @@ import torchvision
 from torch import nn
 
 from model.attention import *
+from model.spot_type_utils import expand_spot_type_sequence, gather_token_bank
 
 
 class NetBlock(nn.Module):
@@ -135,9 +136,10 @@ class NicheTrans(nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _get_neighborhood_tokens(self, spot_type, ring_length):
-        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
-        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+    def _get_neighborhood_tokens(self, neighbor_spot_types):
+        ring_length = neighbor_spot_types.size(1) // 2
+        neigh1 = gather_token_bank(self.token_neigh_1, neighbor_spot_types[:, :ring_length])
+        neigh2 = gather_token_bank(self.token_neigh_2, neighbor_spot_types[:, ring_length:])
         return neigh1, neigh2
 
 
@@ -150,9 +152,12 @@ class NicheTrans(nn.Module):
         source_neighbor : Tensor, shape (B, L, source_length)
             Neighbor omics features; L must be even (split equally into two
             rings).
-        spot_type : LongTensor, shape (B,), optional
-            Integer spot-type IDs in ``[0, n_spot_types)``.  When omitted (or
-            when ``n_spot_types == 1``) all spots use type 0.
+        spot_type : LongTensor, shape (B,) or (B, 1+L), optional
+            Integer spot-type IDs in ``[0, n_spot_types)``. ``(B,)`` keeps the
+            legacy behavior and broadcasts the center type to every token.
+            ``(B, 1+L)`` provides one type ID per token in
+            ``[center, first-order..., second-order...]`` order. Negative IDs
+            mark padded neighbors and produce zero spatial tokens.
         """
         # 当前 batch 大小，即中心细胞/spot 的数量。
         b = source.size(0)
@@ -160,15 +165,14 @@ class NicheTrans(nn.Module):
         l = source_neighbor.size(1)
 
         # ── Spot-type-specific center token ──────────────────────────────
-        if spot_type is None:
-            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
-        else:
-            spot_type = spot_type.long()
-        # Lookup: (B, fea_size) -> (B, 1, fea_size) for concat below.
-        center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
-
-        # Ring tokens are selected from the per-type token bank.
-        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
+        spot_type = expand_spot_type_sequence(
+            spot_type=spot_type,
+            batch_size=b,
+            token_count=1 + l,
+            device=source.device,
+        )
+        center_token = gather_token_bank(self.token_center_emb.weight, spot_type[:, :1])
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type[:, 1:])
 
         # Assemble full spatial-token sequence: (B, 1+L, fea_size).
         # center_token is (B, 1, fea_size); ring tokens broadcast from (1, *, fea_size).

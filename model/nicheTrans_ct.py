@@ -6,6 +6,7 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.spot_type_utils import expand_spot_type_sequence, gather_token_bank
 
 
 class NetBlock(nn.Module):
@@ -143,16 +144,24 @@ class NicheTrans_ct(nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _get_sample_cell_type_ids(self, batch_size, device, cell_inf=None, spot_type=None):
+    def _get_token_spot_type_ids(self, batch_size, token_count, device, cell_inf=None, spot_type=None):
         if spot_type is not None:
-            return spot_type.long()
+            return expand_spot_type_sequence(
+                spot_type=spot_type,
+                batch_size=batch_size,
+                token_count=token_count,
+                device=device,
+            )
         if cell_inf is not None:
-            return cell_inf[:, 0, :].argmax(dim=-1)
-        return torch.zeros(batch_size, dtype=torch.long, device=device)
+            token_ids = cell_inf.argmax(dim=-1).long()
+            token_ids[cell_inf.sum(dim=-1) <= 0] = -1
+            return token_ids
+        return torch.zeros((batch_size, token_count), dtype=torch.long, device=device)
 
-    def _get_neighborhood_tokens(self, sample_cell_type_ids, ring_length):
-        neigh1 = self.token_neigh_1[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
-        neigh2 = self.token_neigh_2[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
+    def _get_neighborhood_tokens(self, neighbor_spot_types):
+        ring_length = neighbor_spot_types.size(1) // 2
+        neigh1 = gather_token_bank(self.token_neigh_1, neighbor_spot_types[:, :ring_length])
+        neigh2 = gather_token_bank(self.token_neigh_2, neighbor_spot_types[:, ring_length:])
         return neigh1, neigh2
 
     def forward(self, source, source_neighbor, cell_inf=None, spot_type=None):
@@ -167,17 +176,24 @@ class NicheTrans_ct(nn.Module):
             One-hot cell-type composition for center + every neighbor token.
             When provided the model adds a soft cell-type embedding on top of
             the spatial tokens.
-        spot_type : LongTensor, shape (B,), optional
-            Integer global cell-type ID for the center spot.
+        spot_type : LongTensor, shape (B,) or (B, 1+L), optional
+            Integer global cell-type IDs. ``(B,)`` keeps the legacy
+            center-broadcast behavior. ``(B, 1+L)`` provides one type ID per
+            token in the same order as ``source_neighbor``. Negative IDs mark
+            padded neighbors and produce zero spatial tokens.
         """
         b = source.size(0)
         l = source_neighbor.size(1)
 
-        spot_type = self._get_sample_cell_type_ids(
-            batch_size=b, device=source.device, cell_inf=cell_inf, spot_type=spot_type
+        spot_type = self._get_token_spot_type_ids(
+            batch_size=b,
+            token_count=1 + l,
+            device=source.device,
+            cell_inf=cell_inf,
+            spot_type=spot_type,
         )
-        center_token = self.token_center_emb(spot_type).unsqueeze(1)
-        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
+        center_token = gather_token_bank(self.token_center_emb.weight, spot_type[:, :1])
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type[:, 1:])
 
         spatial_tokens = torch.cat(
             [center_token,

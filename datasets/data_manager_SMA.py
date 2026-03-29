@@ -388,9 +388,10 @@ class SMA(object):
         Each element is::
 
             (img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors,
-             spot_type_id, sample_id)
+             spot_type_ids, sample_id)
 
-        ``spot_type_id`` is an int in ``[0, n_spot_types)``.
+        ``spot_type_ids`` stores the center spot type followed by first-order
+        and second-order neighbor types. Missing/padded neighbors use ``-1``.
         """
 
         dataset = []
@@ -433,6 +434,7 @@ class SMA(object):
                         spot_type_id = all_spot_type_ids.get(global_key, 0)
 
                         rna_neighbors, msi_neighbors = [], []
+                        neighbor1_spot_type_ids, neighbor2_spot_type_ids = [], []
 
                         neighbors_1, neighbors_2 = graph_1[key], graph_2[key]
                         # 缂備焦顨忛崗娑氳姳閳哄懎鎹堕柛顐犲劚娴犳悂鎮橀悙鍙夊櫣妤犵偞鎹囬獮鎺撳緞婵犲倸娈ラ柣鐐村嚬閸嬪棝顢栭崶銊р枖闁逞屽墴瀹曠兘宕奸敐搴㈣埞闂佺儵鏅滈悧婊冣枔閹达附鍊烽柣褍鎽滅粈澶愭⒑椤掆偓閻忔繈宕㈤妶澶嬬厒鐎广儱鎷嬪Σ濠氭煏?
@@ -443,8 +445,12 @@ class SMA(object):
                             # 闂備緡鍙€椤曆囨儑瀹曞洨纾介柛婵嗗娴滃ジ鏌￠崘鈺佸姸閽樼喖姊婚崱姘【闁诡喗绮撻弻宀冪疀閵壯咁槷婵烇絽娲︾换鍐偓鍨瀹曞爼宕崟顓熸瘞闁哄鐗婇幐鎼佸矗閸℃瑧纾奸柡澶嬪灥椤斿﹪鏌?
                             if j not in rna_keys:
                                 rna_neighbors.append(np.zeros_like(rna_temp))
+                                neighbor1_spot_type_ids.append(-1)
                             else:
                                 rna_neighbors.append(rna_dic[j][self.rna_mask])
+                                neighbor1_spot_type_ids.append(
+                                    all_spot_type_ids.get(names[i] + '/' + j, -1)
+                                )
 
                             if j not in msi_keys:
                                 msi_neighbors.append(np.zeros_like(msi_temp))
@@ -456,14 +462,19 @@ class SMA(object):
                             for _ in range(4-len(neighbors_1)):
                                 rna_neighbors.append(np.zeros_like(rna_temp))
                                 msi_neighbors.append(np.zeros_like(msi_temp))
+                                neighbor1_spot_type_ids.append(-1)
 
                         # connect to the second round
                         for j in neighbors_2:
                             # 缂備焦顨忛崗娑氳姳閳哄懎鎹堕柛顐ｇ矌閻熴垻绱掑Δ濠傚幐缂佹梹鎸冲畷鐑藉醇閵忥紕銈查梺鍛婅壘閻妲愬┑鍥┾枙闁绘棁娉涢埢蹇涙煟椤剙濡兼繛瀛樺姉閳ь剝顫夊畝鎼佸汲鏉堛劍鍎熼柨鏃傚亾閻ｉ亶姊洪鈽嗗殭闁绘挻鐟х槐鎾诲冀椤愩倕鐏ｉ梺?
                             if j not in rna_keys:
                                 rna_neighbors.append(np.zeros_like(rna_temp))
+                                neighbor2_spot_type_ids.append(-1)
                             else:
                                 rna_neighbors.append(rna_dic[j][self.rna_mask])
+                                neighbor2_spot_type_ids.append(
+                                    all_spot_type_ids.get(names[i] + '/' + j, -1)
+                                )
 
                             if j not in msi_keys:
                                 msi_neighbors.append(np.zeros_like(msi_temp))
@@ -475,15 +486,20 @@ class SMA(object):
                             for _ in range(4-len(neighbors_2)):
                                 rna_neighbors.append(np.zeros_like(rna_temp))
                                 msi_neighbors.append(np.zeros_like(msi_temp))
+                                neighbor2_spot_type_ids.append(-1)
 
                         # 闂佸搫鐗冮崑鎾剁磽娴ｅ摜澧旂紒鏂跨摠缁嬪顢旈崨顖氼棊闂佸搫鐗滈崜娑㈠极闁秵鏅?
                         # 婵炴垶鎼╅崢鑲╃紦妤ｅ啫鐐婇柟顖嗗啫澹?+ 婵炴垶鎼╅崢鑲╃紦?RNA + 婵炴垶鎼╅崢鑲╃紦?MSI + 8 婵?RNA 闂備緡鍙€椤曆囨儑?+ 8 婵?MSI 闂備緡鍙€椤曆囨儑?
                         # + spot_type_id + sample id 缂傚倷绀佺€氼參宕瑰璺何?
                         rna_neighbors = np.stack(rna_neighbors)
                         msi_neighbors = np.stack(msi_neighbors)
+                        spot_type_ids = np.asarray(
+                            [spot_type_id] + neighbor1_spot_type_ids + neighbor2_spot_type_ids,
+                            dtype=np.int64,
+                        )
 
                         dataset.append((img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors,
-                                        spot_type_id, names[i] + '/' + key))
+                                        spot_type_ids, names[i] + '/' + key))
 
         return dataset
 

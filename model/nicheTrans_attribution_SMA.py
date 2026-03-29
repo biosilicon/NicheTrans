@@ -5,6 +5,7 @@ import torchvision
 from torch import nn
 
 from model.attention import *
+from model.spot_type_utils import expand_spot_type_sequence, gather_token_bank
 
 
 class NetBlock(nn.Module):
@@ -111,20 +112,23 @@ class NicheTrans(nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _get_neighborhood_tokens(self, spot_type, ring_length):
-        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
-        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+    def _get_neighborhood_tokens(self, neighbor_spot_types):
+        ring_length = neighbor_spot_types.size(1) // 2
+        neigh1 = gather_token_bank(self.token_neigh_1, neighbor_spot_types[:, :ring_length])
+        neigh2 = gather_token_bank(self.token_neigh_2, neighbor_spot_types[:, ring_length:])
         return neigh1, neigh2
 
     def forward(self, data, spot_type=None):
         b = data.size(0)
         l = data.size(1) - 1
-        if spot_type is None:
-            spot_type = torch.zeros(b, dtype=torch.long, device=data.device)
-        else:
-            spot_type = spot_type.long()
-        center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
-        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
+        spot_type = expand_spot_type_sequence(
+            spot_type=spot_type,
+            batch_size=b,
+            token_count=1 + l,
+            device=data.device,
+        )
+        center_token = gather_token_bank(self.token_center_emb.weight, spot_type[:, :1])
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type[:, 1:])
         spatial_tokens = torch.cat([center_token,
                                     neigh1_tokens,
                                     neigh2_tokens], dim=1)

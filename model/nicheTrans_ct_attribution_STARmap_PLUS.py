@@ -6,6 +6,7 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.spot_type_utils import gather_token_bank
 
 
 class NetBlock(nn.Module):
@@ -120,14 +121,17 @@ class NicheTrans_ct(nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _get_sample_cell_type_ids(self, cell_inf, batch_size, device):
+    def _get_token_spot_type_ids(self, cell_inf, batch_size, token_count, device):
         if cell_inf is None:
-            return torch.zeros(batch_size, dtype=torch.long, device=device)
-        return cell_inf[:, 0, :].argmax(dim=-1)
+            return torch.zeros((batch_size, token_count), dtype=torch.long, device=device)
+        token_ids = cell_inf.argmax(dim=-1).long()
+        token_ids[cell_inf.sum(dim=-1) <= 0] = -1
+        return token_ids
 
-    def _get_neighborhood_tokens(self, sample_cell_type_ids, ring_length):
-        neigh1 = self.token_neigh_1[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
-        neigh2 = self.token_neigh_2[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
+    def _get_neighborhood_tokens(self, neighbor_spot_types):
+        ring_length = neighbor_spot_types.size(1) // 2
+        neigh1 = gather_token_bank(self.token_neigh_1, neighbor_spot_types[:, :ring_length])
+        neigh2 = gather_token_bank(self.token_neigh_2, neighbor_spot_types[:, ring_length:])
         return neigh1, neigh2
 
     def forward(self, input):
@@ -139,9 +143,11 @@ class NicheTrans_ct(nn.Module):
 
         classes_tokens = (self.cell_tokens * cell_inf.unsqueeze(dim=-1)).sum(-2)
 
-        spot_type = self._get_sample_cell_type_ids(cell_inf=cell_inf, batch_size=b, device=input.device)
-        center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
-        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
+        spot_type = self._get_token_spot_type_ids(
+            cell_inf=cell_inf, batch_size=b, token_count=1 + l, device=input.device
+        )
+        center_token = gather_token_bank(self.token_center_emb.weight, spot_type[:, :1])
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type[:, 1:])
         spatial_tokens = torch.cat([center_token,
                                     neigh1_tokens,
                                     neigh2_tokens], dim=1)

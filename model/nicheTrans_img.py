@@ -6,6 +6,7 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.spot_type_utils import expand_spot_type_sequence, gather_token_bank
 
 
 class NicheTrans_img(nn.Module):
@@ -110,9 +111,10 @@ class NicheTrans_img(nn.Module):
             state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
         )
 
-    def _get_neighborhood_tokens(self, spot_type, ring_length):
-        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
-        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+    def _get_neighborhood_tokens(self, neighbor_spot_types):
+        ring_length = neighbor_spot_types.size(1) // 2
+        neigh1 = gather_token_bank(self.token_neigh_1, neighbor_spot_types[:, :ring_length])
+        neigh2 = gather_token_bank(self.token_neigh_2, neighbor_spot_types[:, ring_length:])
         return neigh1, neigh2
 
     def forward(self, img, source, source_neighbor, spot_type=None):
@@ -125,20 +127,23 @@ class NicheTrans_img(nn.Module):
             Center-spot omics features.
         source_neighbor : Tensor, shape (B, 8, source_length)
             Neighbor omics features (4 inner + 4 outer ring).
-        spot_type : LongTensor, shape (B,), optional
-            Integer spot-type IDs in ``[0, n_spot_types)``.  Defaults to
-            type 0 for every spot when omitted.
+        spot_type : LongTensor, shape (B,) or (B, 9), optional
+            Integer spot-type IDs in ``[0, n_spot_types)``. ``(B,)`` keeps the
+            legacy center-broadcast behavior. ``(B, 9)`` should follow
+            ``[center, neigh1_x4, neigh2_x4]`` order. Negative IDs mark
+            padded neighbors and produce zero spatial tokens.
         """
         b = img.size(0)
 
         # ── Spot-type-specific center token ──────────────────────────────
-        if spot_type is None:
-            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
-        else:
-            spot_type = spot_type.long()
-        # Lookup per-spot center token: (B, fea_size) -> (B, 1, fea_size).
-        center_token = self.token_center_emb(spot_type).unsqueeze(1)
-        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, 4)
+        spot_type = expand_spot_type_sequence(
+            spot_type=spot_type,
+            batch_size=b,
+            token_count=9,
+            device=source.device,
+        )
+        center_token = gather_token_bank(self.token_center_emb.weight, spot_type[:, :1])
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type[:, 1:])
 
         spatial_tokens = torch.cat(
             [center_token,
