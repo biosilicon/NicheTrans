@@ -47,11 +47,17 @@ class NetBlock(nn.Module):
 
 class NicheTrans_ct(nn.Module):
     # def __init__(self, rna_length=877, msi_length=137):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1,
+                 n_spot_types=1, n_cell_types=None):
         super(NicheTrans_ct, self).__init__()
+
+        if n_cell_types is None:
+            n_cell_types = n_spot_types
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.n_spot_types = n_spot_types
+        self.n_cell_types = n_cell_types
 
         self.fea_size, self.img_size = 256, 256
 
@@ -85,25 +91,31 @@ class NicheTrans_ct(nn.Module):
         ###############
 
         # to define and normalize the tokens
-        self.token_center = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
         self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
         self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.cell_tokens = nn.Parameter(torch.randn((1, 1, 13, self.fea_size), requires_grad=True))
+        self.token_center_emb = nn.Embedding(n_spot_types, self.fea_size)
+        self.cell_tokens = nn.Parameter(torch.randn((1, 1, self.n_cell_types, self.fea_size), requires_grad=True))
 
         trunc_normal_(self.cell_tokens, std=.02)
-        trunc_normal_(self.token_center, std=.02)
+        trunc_normal_(self.token_center_emb.weight, std=.02)
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
-       
+
     def forward(self, input):
         b = input.size(0)
+        l = input.size(1) - 1
 
-        cell_inf = input[:, :, -13:]
-        omics_data = input[:, :, 0: -13]
+        cell_inf = input[:, :, -self.n_cell_types:]
+        omics_data = input[:, :, :-self.n_cell_types]
 
         classes_tokens = (self.cell_tokens * cell_inf.unsqueeze(dim=-1)).sum(-2)
 
-        spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 6, 1), self.token_neigh_2.repeat(1, 6, 1)], dim=1)
+        # Use type 0 for all spots (attribution model receives fused input tensor).
+        spot_type = torch.zeros(b, dtype=torch.long, device=input.device)
+        center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
+        spatial_tokens = torch.cat([center_token,
+                                    self.token_neigh_1.expand(b, l // 2, -1),
+                                    self.token_neigh_2.expand(b, l // 2, -1)], dim=1)
 
         omic_data = omics_data.view(-1, self.source_length)
 

@@ -1,6 +1,4 @@
 import os
-import re
-import unicodedata
 
 import numpy as np
 import pandas as pd
@@ -72,52 +70,27 @@ def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius
 
 def _resolve_protein_columns(adata):
     columns = list(adata.obs.columns)
-    tau_key = None
-    for col in columns:
-        normalized = _normalize_marker_name(col)
-        if normalized in {'ptau', 'phosphotau', 'ptau'}:
-            tau_key = col
-            break
+    tau_key = 'p-tau' if 'p-tau' in columns else None
     if tau_key is None:
         raise KeyError('Expected a p-tau column in adata.obs for AD_Mouse.')
 
-    preferred_secondary = {'plaque', 'abeta', 'amyloidbeta', 'amyloid'}
+    preferred_secondary = ['plaque', 'abeta', 'a_beta', 'amyloid_beta', 'amyloid', 'aβ', 'aβ']
     plaque_key = None
-    normalized_to_original = {_normalize_marker_name(col): col for col in columns}
+    lower_to_original = {col.lower(): col for col in columns}
     for candidate in preferred_secondary:
-        if candidate in normalized_to_original:
-            plaque_key = normalized_to_original[candidate]
+        if candidate in lower_to_original:
+            plaque_key = lower_to_original[candidate]
             break
 
     if plaque_key is None:
         remaining = [col for col in columns if col != tau_key]
-        plaque_like = []
-        for col in remaining:
-            normalized = _normalize_marker_name(col)
-            if (
-                ('plaque' in normalized) or
-                ('beta' in normalized) or
-                ('abeta' in normalized) or
-                ('amyloid' in normalized)
-            ):
-                plaque_like.append(col)
+        plaque_like = [col for col in remaining if ('plaque' in col.lower()) or ('beta' in col.lower()) or ('amyloid' in col.lower()) or ('β' in col.lower())]
         if plaque_like:
             plaque_key = plaque_like[0]
         else:
-            raise KeyError(
-                'Could not identify the second protein target column for AD_Mouse. '
-                f'Observed columns: {columns}'
-            )
+            raise KeyError('Could not identify the second protein target column for AD_Mouse.')
 
     return [tau_key, plaque_key]
-
-
-def _normalize_marker_name(name):
-    text = unicodedata.normalize('NFKC', str(name)).strip().lower()
-    text = text.replace('β', 'beta')
-    text = text.replace('α', 'alpha')
-    text = re.sub(r'[^a-z0-9]+', '', text)
-    return text
 
 
 class AD_Mouse(object):
