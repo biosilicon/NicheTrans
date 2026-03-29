@@ -13,19 +13,20 @@ def train(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (rna, protein, rna_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (rna, protein, rna_neighbors, spot_type_ids, _) in enumerate(trainloader):
 
-        rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
+        rna = rna.to(device)
+        protein = protein.to(device)
+        rna_neighbors = rna_neighbors.to(device)
+        spot_type_ids = spot_type_ids.to(device)
 
-        ############
         if random.random() > 0.7:
             mask = torch.ones((rna_neighbors.size(0), 8, 1))
             mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             rna_neighbors = rna_neighbors * mask
-        ############
 
         source, target, source_neightbors = rna, protein, rna_neighbors
-        outputs = model(source, source_neightbors)
+        outputs = model(source, source_neightbors, spot_type=spot_type_ids)
         loss = criterion(outputs, target)
 
         optimizer.zero_grad()
@@ -33,8 +34,8 @@ def train(model, criterion, optimizer, trainloader, device=None):
         optimizer.step()
         losses.update(loss.data, source.size(0))
 
-        if (batch_idx+1) == len(trainloader):
-            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx+1, len(trainloader), losses.val, losses.avg))
+        if (batch_idx + 1) == len(trainloader):
+            print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx + 1, len(trainloader), losses.val, losses.avg))
 
 
 def test(model, testloader, device=None):
@@ -44,17 +45,17 @@ def test(model, testloader, device=None):
 
     predict_list, target_list = [], []
 
-
     with torch.no_grad():
-        for _, (source, target, source_neightbors, _) in enumerate(testloader):
+        for _, (source, target, source_neightbors, spot_type_ids, _) in enumerate(testloader):
 
-            source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
+            source = source.to(device)
+            target = target.to(device)
+            source_neightbors = source_neightbors.to(device)
+            spot_type_ids = spot_type_ids.to(device)
+            outputs = model(source, source_neightbors, spot_type=spot_type_ids)
 
             predict_list.append(outputs)
             target_list.append(target)
-
-
 
     pearson_sample_list, spearman_sample_list, rmse_list = evaluator(predict_list, target_list)
     pearson_mean, spearman_mean, rmse_mean = pearson_sample_list.mean(), spearman_sample_list.mean(), rmse_list.mean()

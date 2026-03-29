@@ -4,6 +4,7 @@ import numpy as np
 from PIL import Image
 from torch.utils.data import Dataset
 
+
 def read_image(img_path):
     got_img = False
     while not got_img:
@@ -36,8 +37,8 @@ class SMA_loader(Dataset):
         rna_neighbors = torch.Tensor(rna_neighbors)
         msi_neighbors = torch.Tensor(msi_neighbors)
 
-        # spot_type_id is an integer class index used to select the per-type
-        # learnable spatial token inside the model.
+        # spot_type_id is the final globally consistent cell-type ID used to
+        # select the per-type learnable spatial token inside the model.
         spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
 
         return img, rna_temp, msi_temp, rna_neighbors, msi_neighbors, spot_type_id, sample
@@ -52,14 +53,32 @@ class Lymph_node_loader(Dataset):
 
     def __getitem__(self, index):
         rna_temp, protein_temp, rna_neighbors, sample = self.dataset[index]
-    
+
         rna_temp = torch.Tensor(rna_temp)
         protein_temp = torch.Tensor(protein_temp)
-       
+
         rna_neighbors = torch.Tensor(rna_neighbors)
 
         return rna_temp, protein_temp, rna_neighbors, sample
-    
+
+
+class Lymph_node_celltype_loader(Dataset):
+    def __init__(self, dataset, transform=None):
+        self.dataset = dataset
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def __getitem__(self, index):
+        rna_temp, protein_temp, rna_neighbors, spot_type_id, sample = self.dataset[index]
+
+        rna_temp = torch.Tensor(rna_temp)
+        protein_temp = torch.Tensor(protein_temp)
+        rna_neighbors = torch.Tensor(rna_neighbors)
+        spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
+
+        return rna_temp, protein_temp, rna_neighbors, spot_type_id, sample
+
 
 class Breast_cancer_loader(Dataset):
     def __init__(self, dataset, transform=None):
@@ -72,7 +91,7 @@ class Breast_cancer_loader(Dataset):
         rna, protein, ct, rna_neighbors, ct_neighbor, sample = self.dataset[index]
         rna_temp = torch.Tensor(rna)
         protein_temp = torch.Tensor(protein)
-       
+
         rna_neighbors = torch.Tensor(rna_neighbors)
 
         return rna_temp, protein_temp, rna_neighbors, sample
@@ -88,13 +107,13 @@ class AD_Mouse_loader(Dataset):
 
     def __getitem__(self, index):
         rna, protein, cell, rna_neighbor, cell_neighbor, spot_type_id, sample = self.dataset[index]
-        rna       = torch.Tensor(rna)
-        protein   = torch.Tensor(protein)
-        cell      = torch.Tensor(cell)
-        rna_neighbor  = torch.Tensor(rna_neighbor)
+        rna = torch.Tensor(rna)
+        protein = torch.Tensor(protein)
+        cell = torch.Tensor(cell)
+        rna_neighbor = torch.Tensor(rna_neighbor)
         cell_neighbor = torch.Tensor(cell_neighbor)
-        # spot_type_id is the integer cell-type label used to look up the
-        # per-type learnable spatial center token inside the model.
+        # spot_type_id is the globally encoded cell-type label used to look up
+        # the per-type learnable spatial center token inside the model.
         spot_type_id = torch.tensor(spot_type_id, dtype=torch.long)
 
         return rna, protein, cell, rna_neighbor, cell_neighbor, spot_type_id, sample
@@ -109,10 +128,10 @@ class Embryonic_mouse_brain(Dataset):
 
     def __getitem__(self, index):
         source_temp, target_temp, source_neighbors, sample = self.dataset[index]
-    
+
         source_temp = torch.Tensor(source_temp)
         target_temp = torch.Tensor(target_temp)
-       
+
         source_neighbors = torch.Tensor(source_neighbors)
 
         return source_temp, target_temp, source_neighbors, sample

@@ -84,6 +84,9 @@ class Breast_cancer(object):
         adata.obs['ct'] = ct['Cluster'].values
 
         self.cell_mask = np.array(sorted(set(ct['Cluster'].values.tolist())))
+        # Map cell-type string → integer ID, mirroring STARmap_PLUS convention.
+        self.cell_type_to_id = {ct_name: i for i, ct_name in enumerate(self.cell_mask)}
+        self.n_spot_types = len(self.cell_mask)
 
         centra = adata.obs['x'].values.max()//2
         training_adata = adata[ adata.obs['x'].values <= centra ]
