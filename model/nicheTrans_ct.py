@@ -110,8 +110,9 @@ class NicheTrans_ct(nn.Module):
             )
         self.predict_layers = nn.ModuleList(predict_net)
 
-        self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # Each global cell type owns an independent pair of neighborhood tokens.
+        self.token_neigh_1 = nn.Parameter(torch.randn((self.n_cell_types, self.fea_size), requires_grad=True))
+        self.token_neigh_2 = nn.Parameter(torch.randn((self.n_cell_types, self.fea_size), requires_grad=True))
         self.token_center_emb = nn.Embedding(n_spot_types, self.fea_size)
 
         # ``cell_tokens`` now follows the same global cell-type vocabulary as
@@ -122,6 +123,37 @@ class NicheTrans_ct(nn.Module):
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
         trunc_normal_(self.token_center_emb.weight, std=.02)
+
+    def _expand_legacy_neighborhood_token(self, token):
+        if token.shape == (self.n_cell_types, self.fea_size):
+            return token
+        if token.ndim == 3 and token.shape == (1, 1, self.fea_size):
+            token = token.view(1, self.fea_size)
+        if token.ndim == 2 and token.shape == (1, self.fea_size):
+            return token.expand(self.n_cell_types, -1).clone()
+        return token
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        for token_name in ('token_neigh_1', 'token_neigh_2'):
+            key = prefix + token_name
+            if key in state_dict:
+                state_dict[key] = self._expand_legacy_neighborhood_token(state_dict[key])
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+    def _get_sample_cell_type_ids(self, batch_size, device, cell_inf=None, spot_type=None):
+        if spot_type is not None:
+            return spot_type.long()
+        if cell_inf is not None:
+            return cell_inf[:, 0, :].argmax(dim=-1)
+        return torch.zeros(batch_size, dtype=torch.long, device=device)
+
+    def _get_neighborhood_tokens(self, sample_cell_type_ids, ring_length):
+        neigh1 = self.token_neigh_1[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
+        neigh2 = self.token_neigh_2[sample_cell_type_ids].unsqueeze(1).expand(-1, ring_length, -1)
+        return neigh1, neigh2
 
     def forward(self, source, source_neighbor, cell_inf=None, spot_type=None):
         """
@@ -141,14 +173,16 @@ class NicheTrans_ct(nn.Module):
         b = source.size(0)
         l = source_neighbor.size(1)
 
-        if spot_type is None:
-            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        spot_type = self._get_sample_cell_type_ids(
+            batch_size=b, device=source.device, cell_inf=cell_inf, spot_type=spot_type
+        )
         center_token = self.token_center_emb(spot_type).unsqueeze(1)
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
 
         spatial_tokens = torch.cat(
             [center_token,
-             self.token_neigh_1.expand(b, l // 2, -1),
-             self.token_neigh_2.expand(b, l // 2, -1)],
+             neigh1_tokens,
+             neigh2_tokens],
             dim=1
         )
 

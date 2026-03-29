@@ -79,14 +79,10 @@ class NicheTrans_img(nn.Module):
 
         ################
         # Spatial tokens for ring-level positional encoding.
-        # token_neigh_1 / token_neigh_2 encode ring position and are shared
-        # across all spot types.
-        # token_center_emb provides a per-spot-type learnable center token:
-        # each spot type gets its own independent trainable vector so the model
-        # can learn different "anchor" representations for transcriptomically
-        # distinct spot populations.
-        self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # token_neigh_1 / token_neigh_2 are now indexed from a per-spot-type
+        # token bank. token_center_emb remains a per-spot-type center token.
+        self.token_neigh_1 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
+        self.token_neigh_2 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
 
         # Per-spot-type center token embedding: shape (n_spot_types, fea_size).
         self.token_center_emb = nn.Embedding(n_spot_types, self.fea_size)
@@ -94,6 +90,30 @@ class NicheTrans_img(nn.Module):
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
         trunc_normal_(self.token_center_emb.weight, std=.02)
+
+    def _expand_legacy_neighborhood_token(self, token):
+        if token.shape == (self.n_spot_types, self.fea_size):
+            return token
+        if token.ndim == 3 and token.shape == (1, 1, self.fea_size):
+            token = token.view(1, self.fea_size)
+        if token.ndim == 2 and token.shape == (1, self.fea_size):
+            return token.expand(self.n_spot_types, -1).clone()
+        return token
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        for token_name in ('token_neigh_1', 'token_neigh_2'):
+            key = prefix + token_name
+            if key in state_dict:
+                state_dict[key] = self._expand_legacy_neighborhood_token(state_dict[key])
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+    def _get_neighborhood_tokens(self, spot_type, ring_length):
+        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        return neigh1, neigh2
 
     def forward(self, img, source, source_neighbor, spot_type=None):
         """
@@ -114,13 +134,16 @@ class NicheTrans_img(nn.Module):
         # ── Spot-type-specific center token ──────────────────────────────
         if spot_type is None:
             spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        else:
+            spot_type = spot_type.long()
         # Lookup per-spot center token: (B, fea_size) -> (B, 1, fea_size).
         center_token = self.token_center_emb(spot_type).unsqueeze(1)
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, 4)
 
         spatial_tokens = torch.cat(
             [center_token,
-             self.token_neigh_1.expand(b, 4, -1),
-             self.token_neigh_2.expand(b, 4, -1)],
+             neigh1_tokens,
+             neigh2_tokens],
             dim=1
         )  # (B, 9, fea_size)
 

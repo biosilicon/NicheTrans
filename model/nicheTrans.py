@@ -101,14 +101,11 @@ class NicheTrans(nn.Module):
 
         ################
         # Spatial tokens for ring-level positional encoding.
-        # token_neigh_1 / token_neigh_2 are shared across all spot types
-        # (they encode *ring position*, not spot identity).
-        # token_center_emb is spot-type-specific: each spot type has its own
-        # independent learnable center token selected at runtime via an
-        # nn.Embedding lookup.  This lets the model learn different "anchor"
-        # representations for transcriptomically distinct spot populations.
-        self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        # token_neigh_1 / token_neigh_2 are now spot-type-specific and are
+        # indexed at runtime with the sample's spot type.
+        # token_center_emb remains spot-type-specific as well.
+        self.token_neigh_1 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
+        self.token_neigh_2 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
 
         # Per-spot-type center token: shape (n_spot_types, fea_size).
         # nn.Embedding provides efficient integer-indexed lookup and is
@@ -118,6 +115,30 @@ class NicheTrans(nn.Module):
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
         trunc_normal_(self.token_center_emb.weight, std=.02)
+
+    def _expand_legacy_neighborhood_token(self, token):
+        if token.shape == (self.n_spot_types, self.fea_size):
+            return token
+        if token.ndim == 3 and token.shape == (1, 1, self.fea_size):
+            token = token.view(1, self.fea_size)
+        if token.ndim == 2 and token.shape == (1, self.fea_size):
+            return token.expand(self.n_spot_types, -1).clone()
+        return token
+
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        for token_name in ('token_neigh_1', 'token_neigh_2'):
+            key = prefix + token_name
+            if key in state_dict:
+                state_dict[key] = self._expand_legacy_neighborhood_token(state_dict[key])
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+    def _get_neighborhood_tokens(self, spot_type, ring_length):
+        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        return neigh1, neigh2
 
 
     def forward(self, source, source_neighbor, spot_type=None):
@@ -141,20 +162,20 @@ class NicheTrans(nn.Module):
         # ── Spot-type-specific center token ──────────────────────────────
         if spot_type is None:
             spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        else:
+            spot_type = spot_type.long()
         # Lookup: (B, fea_size) -> (B, 1, fea_size) for concat below.
         center_token = self.token_center_emb(spot_type).unsqueeze(1)  # (B, 1, fea_size)
 
-        # Ring tokens are shared; broadcast over the batch dimension.
-        # Shape: (1, L//2, fea_size) each.
-        neigh1_tokens = self.token_neigh_1.repeat(1, l // 2, 1)  # (1, L/2, fea_size)
-        neigh2_tokens = self.token_neigh_2.repeat(1, l // 2, 1)  # (1, L/2, fea_size)
+        # Ring tokens are selected from the per-type token bank.
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
 
         # Assemble full spatial-token sequence: (B, 1+L, fea_size).
         # center_token is (B, 1, fea_size); ring tokens broadcast from (1, *, fea_size).
         spatial_tokens = torch.cat(
             [center_token,
-             neigh1_tokens.expand(b, -1, -1),
-             neigh2_tokens.expand(b, -1, -1)],
+             neigh1_tokens,
+             neigh2_tokens],
             dim=1
         )  # (B, 1+L, fea_size)
 

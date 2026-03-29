@@ -41,11 +41,13 @@ class NetBlock(nn.Module):
 
 # NicheTrans with spatial information only
 class NicheTrans(nn.Module):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1,
+                 n_spot_types=1):
         super(NicheTrans, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.n_spot_types = n_spot_types
 
         self.fea_size, self.img_size = 256, 128
 
@@ -78,18 +80,49 @@ class NicheTrans(nn.Module):
         ################
         # initialize tokens for semantic embedding
         self.token_center = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_1 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
-        self.token_neigh_2 = nn.Parameter(torch.randn((1, 1, self.fea_size), requires_grad=True))
+        self.token_neigh_1 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
+        self.token_neigh_2 = nn.Parameter(torch.randn((self.n_spot_types, self.fea_size), requires_grad=True))
 
         trunc_normal_(self.token_center, std=.02)
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
 
+    def _expand_legacy_neighborhood_token(self, token):
+        if token.shape == (self.n_spot_types, self.fea_size):
+            return token
+        if token.ndim == 3 and token.shape == (1, 1, self.fea_size):
+            token = token.view(1, self.fea_size)
+        if token.ndim == 2 and token.shape == (1, self.fea_size):
+            return token.expand(self.n_spot_types, -1).clone()
+        return token
 
-    def forward(self, source, source_neighbor):
+    def _load_from_state_dict(self, state_dict, prefix, local_metadata, strict,
+                              missing_keys, unexpected_keys, error_msgs):
+        for token_name in ('token_neigh_1', 'token_neigh_2'):
+            key = prefix + token_name
+            if key in state_dict:
+                state_dict[key] = self._expand_legacy_neighborhood_token(state_dict[key])
+        super()._load_from_state_dict(
+            state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
+        )
+
+    def _get_neighborhood_tokens(self, spot_type, ring_length):
+        neigh1 = self.token_neigh_1[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        neigh2 = self.token_neigh_2[spot_type].unsqueeze(1).expand(-1, ring_length, -1)
+        return neigh1, neigh2
+
+
+    def forward(self, source, source_neighbor, spot_type=None):
         b = source.size(0)
         l = source_neighbor.size(1)
-        spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, l//2, 1), self.token_neigh_2.repeat(1, l//2, 1)], dim=1)
+        if spot_type is None:
+            spot_type = torch.zeros(b, dtype=torch.long, device=source.device)
+        else:
+            spot_type = spot_type.long()
+        neigh1_tokens, neigh2_tokens = self._get_neighborhood_tokens(spot_type, l // 2)
+        spatial_tokens = torch.cat(
+            [self.token_center.expand(b, -1, -1), neigh1_tokens, neigh2_tokens], dim=1
+        )
 
         source = source[:, None, :]
         omic_data = torch.cat([source, source_neighbor], dim=1).view(-1, self.source_length)
