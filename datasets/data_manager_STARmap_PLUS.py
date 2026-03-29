@@ -74,7 +74,7 @@ def _resolve_protein_columns(adata):
     if tau_key is None:
         raise KeyError('Expected a p-tau column in adata.obs for AD_Mouse.')
 
-    preferred_secondary = ['plaque', 'abeta', 'a_beta', 'amyloid_beta', 'amyloid']
+    preferred_secondary = ['plaque', 'abeta', 'a_beta', 'amyloid_beta', 'amyloid', 'aβ', 'aβ']
     plaque_key = None
     lower_to_original = {col.lower(): col for col in columns}
     for candidate in preferred_secondary:
@@ -84,7 +84,7 @@ def _resolve_protein_columns(adata):
 
     if plaque_key is None:
         remaining = [col for col in columns if col != tau_key]
-        plaque_like = [col for col in remaining if ('plaque' in col.lower()) or ('beta' in col.lower()) or ('amyloid' in col.lower())]
+        plaque_like = [col for col in remaining if ('plaque' in col.lower()) or ('beta' in col.lower()) or ('amyloid' in col.lower()) or ('β' in col.lower())]
         if plaque_like:
             plaque_key = plaque_like[0]
         else:
