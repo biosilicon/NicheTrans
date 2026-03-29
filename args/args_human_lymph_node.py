@@ -34,7 +34,7 @@ def generate_args():
                         help="weight decay (default: 5e-04)")
 
     # Miscs
-    parser.add_argument('--seed', type=int, default=1, help="manual seed")
+    parser.add_argument('--seed', type=int, default=42, help="manual seed")
     parser.add_argument('--save-dir', type=str, default='./log', help="manual seed")
     parser.add_argument('--eval-step', type=int, default=1,
                         help="run evaluation for every N epochs (set to -1 to test after training)")
