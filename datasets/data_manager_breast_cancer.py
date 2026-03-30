@@ -124,10 +124,11 @@ class Breast_cancer(object):
         graph = Cal_Spatial_Net_row_col(rna_adata, k_cutoff=12, model='KNN', mouse=True)
 
         ######
-        dict_rna, dict_ct = {}, {}
+        dict_rna, dict_ct, dict_spot_type = {}, {}, {}
         for i, index in enumerate(indexes):
             dict_rna[index] = rna_array[i]
             dict_ct[index] = (ct_array[i] == self.cell_mask) * 1
+            dict_spot_type[index] = self.cell_type_to_id[ct_array[i]]
         #######
         
         for i in range(rna_adata.shape[0]):
@@ -135,15 +136,19 @@ class Breast_cancer(object):
 
             index = indexes[i]
             rna, protein, ct = rna_array[i], proteins[i], dict_ct[index]
+            spot_type_id = dict_spot_type[index]
+            neighbor_spot_type_ids = []
 
             for j in graph[index]:
                 rna_neighbor.append(dict_rna[j])
                 ct_neighbor.append(dict_ct[j])
+                neighbor_spot_type_ids.append(dict_spot_type[j])
 
             rna_neighbor = np.array(rna_neighbor)
             ct_neighbor = np.array(ct_neighbor)
+            spot_type_ids = np.asarray([spot_type_id] + neighbor_spot_type_ids, dtype=np.int64)
 
-            dataset.append((rna, protein, ct, rna_neighbor, ct_neighbor, index))
+            dataset.append((rna, protein, ct, rna_neighbor, ct_neighbor, spot_type_ids, index))
 
         return dataset
 

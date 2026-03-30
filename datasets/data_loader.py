@@ -88,13 +88,14 @@ class Breast_cancer_loader(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        rna, protein, ct, rna_neighbors, ct_neighbor, sample = self.dataset[index]
+        rna, protein, ct, rna_neighbors, ct_neighbor, spot_type_id, sample = self.dataset[index]
         rna_temp = torch.Tensor(rna)
         protein_temp = torch.Tensor(protein)
 
         rna_neighbors = torch.Tensor(rna_neighbors)
+        spot_type_id = torch.as_tensor(spot_type_id, dtype=torch.long)
 
-        return rna_temp, protein_temp, rna_neighbors, sample
+        return rna_temp, protein_temp, rna_neighbors, spot_type_id, sample
 
 
 class AD_Mouse_loader(Dataset):
@@ -127,11 +128,12 @@ class Embryonic_mouse_brain(Dataset):
         return len(self.dataset)
 
     def __getitem__(self, index):
-        source_temp, target_temp, source_neighbors, sample = self.dataset[index]
+        source_temp, target_temp, source_neighbors, spot_type_id, sample = self.dataset[index]
 
         source_temp = torch.Tensor(source_temp)
         target_temp = torch.Tensor(target_temp)
 
         source_neighbors = torch.Tensor(source_neighbors)
+        spot_type_id = torch.as_tensor(spot_type_id, dtype=torch.long)
 
-        return source_temp, target_temp, source_neighbors, sample
+        return source_temp, target_temp, source_neighbors, spot_type_id, sample

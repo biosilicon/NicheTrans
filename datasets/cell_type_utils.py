@@ -23,6 +23,7 @@ DEFAULT_CELL_TYPE_ANNOTATION_KEYS = (
 def _sanitize_labels(labels):
     clean_labels = []
     for label in np.asarray(labels, dtype=object):
+        # Normalize missing or empty labels to a shared placeholder.
         if pd.isna(label):
             clean_labels.append('Unknown')
             continue
@@ -40,6 +41,7 @@ def detect_cell_type_annotation_key(
     if candidate_keys is None:
         candidate_keys = DEFAULT_CELL_TYPE_ANNOTATION_KEYS
 
+    # Only consider keys that exist in every slice.
     for key in candidate_keys:
         if not all(key in adata.obs.columns for adata in adata_list):
             continue
@@ -49,6 +51,7 @@ def detect_cell_type_annotation_key(
         for adata in adata_list:
             labels = _sanitize_labels(adata.obs[key].values)
             non_unknown = labels[labels != 'Unknown']
+            # Skip this key if any slice has no usable labels.
             if non_unknown.size == 0:
                 valid = False
                 break
@@ -67,6 +70,7 @@ def detect_cell_type_annotation_key(
 
 
 def encode_annotation_cell_types(adata_list, slice_names, annotation_key, verbose=True):
+    # Build one global label-to-id mapping shared by all slices.
     global_names = sorted(
         {
             label
@@ -118,6 +122,7 @@ def _resolve_feature_masks(adata_list, feature_masks):
     if feature_masks is None:
         return [None] * len(adata_list)
 
+    # Accept either one mask per slice or one shared mask.
     if isinstance(feature_masks, (list, tuple)):
         return list(feature_masks)
 
@@ -132,6 +137,13 @@ def _subset_for_clustering(adata, feature_mask):
 
 
 def _cluster_centroids(adata, local_ids, n_local_types):
+    """Compute one centroid per local cluster from the expression matrix.
+
+    Each centroid is the mean feature vector of all cells assigned to the
+    corresponding local cluster. The returned array has shape
+    ``(n_local_types, n_features)`` and is later used for cross-slice
+    similarity matching.
+    """
     X = adata.X
     if issparse(X):
         X = X.toarray()
@@ -141,6 +153,7 @@ def _cluster_centroids(adata, local_ids, n_local_types):
         mask = local_ids == local_id
         if mask.sum() == 0:
             continue
+        # Represent each local cluster by its mean expression vector.
         centroids[local_id] = X[mask].mean(axis=0)
 
     return centroids
@@ -156,6 +169,40 @@ def cluster_and_align_cell_types(
     similarity_threshold=0.5,
     verbose=True,
 ):
+    """Cluster each slice independently and align clusters across slices.
+
+    Parameters
+    ----------
+    adata_list : list
+        List of AnnData objects, where each item corresponds to one slice.
+    slice_names : list
+        Slice names aligned one-to-one with ``adata_list``.
+    feature_masks : None, array-like, or list of array-like, optional
+        Feature-selection mask(s) used before clustering. If a single mask is
+        provided, it is shared across all slices; if a list is provided, each
+        slice uses its own mask.
+    n_pcs : int, optional
+        Target number of principal components used for PCA and neighborhood
+        graph construction. The effective value is clipped to each slice's
+        available number of observations and features.
+    n_neighbors : int, optional
+        Number of neighbors used to build the Scanpy neighborhood graph for
+        Leiden clustering. The effective value is clipped per slice.
+    resolution : float, optional
+        Resolution parameter passed to Leiden clustering. Larger values usually
+        yield more local clusters.
+    similarity_threshold : float, optional
+        Minimum cosine similarity required to match a local cluster to an
+        existing global cell type across slices.
+    verbose : bool, optional
+        If True, print clustering and alignment progress information.
+
+    Returns
+    -------
+    dict
+        A dictionary containing global cell-type ids for each slice, the local
+        to global mapping, generated global names, and alignment metadata.
+    """
     feature_masks = _resolve_feature_masks(adata_list, feature_masks)
 
     local_ids_by_slice = {}
@@ -165,6 +212,7 @@ def cluster_and_align_cell_types(
     for slice_name, adata, feature_mask in zip(slice_names, adata_list, feature_masks):
         adata_hvg = _subset_for_clustering(adata, feature_mask)
 
+        # Keep Scanpy parameters within the slice-specific data limits.
         max_pcs = min(
             n_pcs,
             max(1, adata_hvg.n_vars),
@@ -203,6 +251,7 @@ def cluster_and_align_cell_types(
 
     reference_slice = slice_names[0]
     reference_centroids = local_centroids_by_slice[reference_slice]
+    # Seed the global cell-type space from the first slice.
     global_centroids = [reference_centroids[idx].copy() for idx in range(reference_centroids.shape[0])]
     global_counts = [1] * len(global_centroids)
 
@@ -212,6 +261,7 @@ def cluster_and_align_cell_types(
     for slice_name in slice_names[1:]:
         current_centroids = local_centroids_by_slice[slice_name]
         sim_matrix = cosine_similarity(current_centroids, np.stack(global_centroids, axis=0))
+        # Find the best one-to-one local/global matches, then filter weak ones.
         row_ind, col_ind = linear_sum_assignment(1.0 - sim_matrix)
 
         matched_rows = set()
@@ -233,6 +283,7 @@ def cluster_and_align_cell_types(
             )
 
             old_count = global_counts[global_idx]
+            # Update the global centroid with an incremental mean after a match.
             global_centroids[global_idx] = (
                 (global_centroids[global_idx] * old_count) + current_centroids[row_idx]
             ) / (old_count + 1)
@@ -243,6 +294,7 @@ def cluster_and_align_cell_types(
             if local_id in matched_rows:
                 continue
 
+            # Unmatched local clusters become new global cell types.
             new_global_id = len(global_centroids)
             slice_local_to_global[(slice_name, local_id)] = new_global_id
             global_centroids.append(current_centroids[local_id].copy())
@@ -310,6 +362,7 @@ def resolve_global_cell_types(
             candidate_keys=candidate_annotation_keys,
         )
 
+    # Prefer provided annotations, and fall back to clustering only when needed.
     if detected_annotation_key is not None:
         return encode_annotation_cell_types(
             adata_list=adata_list,

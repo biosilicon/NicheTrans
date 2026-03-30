@@ -13,9 +13,12 @@ def train(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (rna, protein, rna_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (rna, protein, rna_neighbors, spot_type_ids, _) in enumerate(trainloader):
 
-        rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
+        rna = rna.to(device)
+        protein = protein.to(device)
+        rna_neighbors = rna_neighbors.to(device)
+        spot_type_ids = spot_type_ids.to(device)
 
         ############
         if random.random() > 0.7:
@@ -26,7 +29,7 @@ def train(model, criterion, optimizer, trainloader, device=None):
 
         source, target, source_neightbors = rna, protein, rna_neighbors
 
-        outputs = model(source, source_neightbors)
+        outputs = model(source, source_neightbors, spot_type=spot_type_ids)
 
         loss = criterion(outputs, target)
 
@@ -46,11 +49,14 @@ def test(model, testloader, device=None):
     predict_list, target_list = [], []
 
     with torch.no_grad():
-        for _, (rna, protein, rna_neighbors, _) in enumerate(testloader):
-            rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
+        for _, (rna, protein, rna_neighbors, spot_type_ids, _) in enumerate(testloader):
+            rna = rna.to(device)
+            protein = protein.to(device)
+            rna_neighbors = rna_neighbors.to(device)
+            spot_type_ids = spot_type_ids.to(device)
             source, target, source_neightbors = rna, protein, rna_neighbors
 
-            outputs = model(source, source_neightbors)
+            outputs = model(source, source_neightbors, spot_type=spot_type_ids)
 
             predict_list.append(outputs)
             target_list.append(target)

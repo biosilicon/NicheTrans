@@ -14,9 +14,12 @@ def train_regression(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (source, target, source_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (source, target, source_neighbors, spot_type_ids, _) in enumerate(trainloader):
 
-        source, target, source_neighbors = source.to(device), target.to(device), source_neighbors.to(device)
+        source = source.to(device)
+        target = target.to(device)
+        source_neighbors = source_neighbors.to(device)
+        spot_type_ids = spot_type_ids.to(device)
 
         ############
         if random.random() > 0.7:
@@ -25,7 +28,7 @@ def train_regression(model, criterion, optimizer, trainloader, device=None):
             source_neighbors = source_neighbors * mask
         ############
 
-        outputs = model(source, source_neighbors)
+        outputs = model(source, source_neighbors, spot_type=spot_type_ids)
         loss = criterion(outputs, target)
 
         optimizer.zero_grad()
@@ -43,9 +46,12 @@ def train_binary(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (source, target, source_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (source, target, source_neighbors, spot_type_ids, _) in enumerate(trainloader):
 
-        source, target, source_neighbors = source.to(device), target.to(device), source_neighbors.to(device)
+        source = source.to(device)
+        target = target.to(device)
+        source_neighbors = source_neighbors.to(device)
+        spot_type_ids = spot_type_ids.to(device)
 
         ############
         if random.random() > 0.7:
@@ -54,7 +60,7 @@ def train_binary(model, criterion, optimizer, trainloader, device=None):
             source_neighbors = source_neighbors * mask
         ############
 
-        outputs = model(source, source_neighbors)
+        outputs = model(source, source_neighbors, spot_type=spot_type_ids)
         outputs = torch.sigmoid(outputs)
         loss = criterion(outputs, target)
 
@@ -77,10 +83,13 @@ def test_regression(model, testloader, if_sigmoid=False, device=None):
 
 
     with torch.no_grad():
-        for _, (source, target, source_neightbors, _) in enumerate(testloader):
+        for _, (source, target, source_neightbors, spot_type_ids, _) in enumerate(testloader):
 
-            source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
+            source = source.to(device)
+            target = target.to(device)
+            source_neightbors = source_neightbors.to(device)
+            spot_type_ids = spot_type_ids.to(device)
+            outputs = model(source, source_neightbors, spot_type=spot_type_ids)
 
             if if_sigmoid:
                 outputs = torch.sigmoid(outputs)
@@ -105,10 +114,13 @@ def test_binary(model, testloader, device=None):
 
 
     with torch.no_grad():
-        for _, (source, target, source_neightbors, _) in enumerate(testloader):
+        for _, (source, target, source_neightbors, spot_type_ids, _) in enumerate(testloader):
 
-            source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
+            source = source.to(device)
+            target = target.to(device)
+            source_neightbors = source_neightbors.to(device)
+            spot_type_ids = spot_type_ids.to(device)
+            outputs = model(source, source_neightbors, spot_type=spot_type_ids)
             outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)

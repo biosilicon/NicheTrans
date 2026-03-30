@@ -16,6 +16,8 @@ from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
+from datasets.cell_type_utils import resolve_global_cell_types
+
 def tfidf3(count_mat): 
     model = TfidfTransformer(smooth_idf=False, norm="l2")
     model = model.fit(np.transpose(count_mat))
@@ -135,16 +137,58 @@ class ATAC_RNA_Seq(object):
         e13_mask = rna.obs['sample'] == 'e13'
         e15_mask = rna.obs['sample'] == 'e15'
         e18_mask = rna.obs['sample'] == 'e18'
+
+        source_by_sample = {
+            'e13': rna[e13_mask] if RNA2ATAC else atac[e13_mask],
+            'e15': rna[e15_mask] if RNA2ATAC else atac[e15_mask],
+            'e18': rna[e18_mask] if RNA2ATAC else atac[e18_mask],
+        }
+        target_by_sample = {
+            'e13': atac[e13_mask] if RNA2ATAC else rna[e13_mask],
+            'e15': atac[e15_mask] if RNA2ATAC else rna[e15_mask],
+            'e18': atac[e18_mask] if RNA2ATAC else rna[e18_mask],
+        }
+
+        cell_type_info = resolve_global_cell_types(
+            adata_list=[source_by_sample['e13'], source_by_sample['e15'], source_by_sample['e18']],
+            slice_names=['e13', 'e15', 'e18'],
+            verbose=True,
+        )
+        self.cell_type_source = cell_type_info['source']
+        self.cell_type_annotation_key = cell_type_info['annotation_key']
+        self.cell_mask = cell_type_info['cell_type_names']
+        self.cell_type_to_id = cell_type_info['name_to_id']
+        self.global_cell_type_id_to_name = cell_type_info['id_to_name']
+        self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
+        self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
+        self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.n_spot_types = cell_type_info['n_cell_types']
         
         if RNA2ATAC == True:
-            self.training = self._process_data(rna[e18_mask], atac[e18_mask]) + self._process_data(rna[e13_mask], atac[e13_mask])
-            self.testing = self._process_data(rna[e15_mask], atac[e15_mask], knn_smoothing=knn_smoothing) 
+            self.training = (
+                self._process_data(source_by_sample['e18'], target_by_sample['e18'], 'e18')
+                + self._process_data(source_by_sample['e13'], target_by_sample['e13'], 'e13')
+            )
+            self.testing = self._process_data(
+                source_by_sample['e15'],
+                target_by_sample['e15'],
+                'e15',
+                knn_smoothing=knn_smoothing,
+            )
 
             self.target_panel = atac.var_names
             self.source_panel = rna.var_names
         else:
-            self.training = self._process_data(atac[e18_mask], rna[e18_mask]) + self._process_data(atac[e13_mask], rna[e13_mask])
-            self.testing = self._process_data(atac[e15_mask], rna[e15_mask], knn_smoothing=knn_smoothing) 
+            self.training = (
+                self._process_data(source_by_sample['e18'], target_by_sample['e18'], 'e18')
+                + self._process_data(source_by_sample['e13'], target_by_sample['e13'], 'e13')
+            )
+            self.testing = self._process_data(
+                source_by_sample['e15'],
+                target_by_sample['e15'],
+                'e15',
+                knn_smoothing=knn_smoothing,
+            )
 
             self.target_panel = rna.var_names
             self.source_panel = atac.var_names
@@ -164,9 +208,10 @@ class ATAC_RNA_Seq(object):
         print("  train    |  {:5d} spots,".format(num_training_spots))
         print("  test     |  {:5d} spots,".format(num_testing_spots))
         print("  ------------------------------")
+        print(f'  Global cell-type source: {self.cell_type_source}')
+        print(f'  Total global cell types used for embedding: {self.n_spot_types}')
 
-
-    def _process_data(self, source_adata, target_adata, knn_smoothing=False):
+    def _process_data(self, source_adata, target_adata, slide_name, knn_smoothing=False):
         dataset = []
         
         ######
@@ -204,8 +249,11 @@ class ATAC_RNA_Seq(object):
 
         ######
         dict_source = {}
+        dict_spot_type = {}
+        global_spot_type_ids = self.global_cell_type_ids_by_slice[slide_name]
         for i, index in enumerate(indexes):
             dict_source[index] = source_array[i]
+            dict_spot_type[index] = int(global_spot_type_ids[i])
         #######
         
         for i in range(source_adata.shape[0]):
@@ -213,13 +261,17 @@ class ATAC_RNA_Seq(object):
 
             index = indexes[i]
             source, target = source_array[i], target_array[i]
+            spot_type_id = dict_spot_type[index]
+            neighbor_spot_type_ids = []
 
             for j in graph[index]:
                 source_neighbor.append(dict_source[j])
+                neighbor_spot_type_ids.append(dict_spot_type[j])
 
             source_neighbor = np.array(source_neighbor)
+            spot_type_ids = np.asarray([spot_type_id] + neighbor_spot_type_ids, dtype=np.int64)
 
-            dataset.append((source, target, source_neighbor, index))
+            dataset.append((source, target, source_neighbor, spot_type_ids, index))
 
         return dataset
     
