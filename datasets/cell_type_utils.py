@@ -6,7 +6,8 @@ from scipy.optimize import linear_sum_assignment
 from scipy.sparse import issparse
 from sklearn.metrics.pairwise import cosine_similarity
 
-
+##################################################################
+#清洗数据
 DEFAULT_CELL_TYPE_ANNOTATION_KEYS = (
     'cell_type',
     'celltype',
@@ -30,7 +31,6 @@ def _sanitize_labels(labels):
         clean_labels.append(label_text if label_text else 'Unknown')
 
     return np.asarray(clean_labels, dtype=object)
-
 
 def detect_cell_type_annotation_key(
     adata_list,
@@ -62,6 +62,8 @@ def detect_cell_type_annotation_key(
             return key
 
     return None
+
+####################################################################
 
 
 def encode_annotation_cell_types(adata_list, slice_names, annotation_key, verbose=True):

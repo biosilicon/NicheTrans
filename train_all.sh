@@ -3,10 +3,10 @@
 # Runs all training notebooks with exactly 2 concurrent jobs.
 # Launch with: nohup bash train_all.sh > training_logs/orchestrator.log 2>&1 &
 
-WORKDIR="/mnt/datadisk0/vic/NicheTrans"
+WORKDIR="/mnt/datadisk0/vic/cluster/NicheTrans"
 LOGDIR="$WORKDIR/training_logs"
 EXEC_DIR="$LOGDIR/executed_notebooks"
-JUPYTER="/home/ubuntu/miniconda3/envs/NicheTrans/bin/jupyter"
+JUPYTER="/home/ubuntu/miniconda3/envs/NicheTrans_CellCluster/bin/jupyter"
 STATUS_FILE="$LOGDIR/training_status.txt"
 MAX_JOBS=2
 
