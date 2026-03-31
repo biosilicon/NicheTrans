@@ -144,6 +144,7 @@ class Lymph_node(object):
             visualization_dir=cell_type_visualization_dir,
             visualization_dpi=cell_type_visualization_dpi,
             verbose=True,
+            resolution=1.0
         )
         self.cell_type_source = cell_type_info['source']
         self.cell_type_annotation_key = cell_type_info['annotation_key']
