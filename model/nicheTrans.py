@@ -192,8 +192,8 @@ class NicheTrans(nn.Module):
         # 提取每个 token 的组学特征，再恢复成 [b, token_num, fea_size]。
         f_omic = self.encoder(omic_data).view(b, -1, self.fea_size)
         # 将可学习的空间 token 加到组学特征上，把空间角色信息注入表示中。
-        # center_token 已经是 spot-type-specific，因此不同类型的 spot 会
-        # 获得不同的空间偏置，ring tokens 仍共享。
+        # center_token 和 ring tokens已经是 spot-type-specific，因此不同类型的 spot 会
+        # 获得不同的空间偏置
         f_omic = f_omic + spatial_tokens
 
         # 经过一层非线性映射，进一步融合和变换特征。

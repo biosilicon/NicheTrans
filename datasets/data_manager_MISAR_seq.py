@@ -89,7 +89,17 @@ def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius
 
 
 class ATAC_RNA_Seq(object):
-    def __init__(self, peak_threshold=0.05, hvg_gene=1500, adata_path=None, RNA2ATAC=False, knn_smoothing=False):
+    def __init__(
+        self,
+        peak_threshold=0.05,
+        hvg_gene=1500,
+        adata_path=None,
+        RNA2ATAC=False,
+        knn_smoothing=False,
+        cell_type_visualize=False,
+        cell_type_visualization_dir=None,
+        cell_type_visualization_dpi=150,
+    ):
         
         self.rna2atac = RNA2ATAC
         ########################
@@ -152,6 +162,9 @@ class ATAC_RNA_Seq(object):
         cell_type_info = resolve_global_cell_types(
             adata_list=[source_by_sample['e13'], source_by_sample['e15'], source_by_sample['e18']],
             slice_names=['e13', 'e15', 'e18'],
+            visualize=cell_type_visualize,
+            visualization_dir=cell_type_visualization_dir,
+            visualization_dpi=cell_type_visualization_dpi,
             verbose=True,
         )
         self.cell_type_source = cell_type_info['source']
@@ -162,6 +175,7 @@ class ATAC_RNA_Seq(object):
         self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
         self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
         self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.cell_type_visualization_paths = cell_type_info.get('visualization_paths', {})
         self.n_spot_types = cell_type_info['n_cell_types']
         
         if RNA2ATAC == True:
@@ -210,6 +224,8 @@ class ATAC_RNA_Seq(object):
         print("  ------------------------------")
         print(f'  Global cell-type source: {self.cell_type_source}')
         print(f'  Total global cell types used for embedding: {self.n_spot_types}')
+        if self.cell_type_visualization_paths:
+            print(f'  Cell-type visualization slices: {sorted(self.cell_type_visualization_paths)}')
 
     def _process_data(self, source_adata, target_adata, slide_name, knn_smoothing=False):
         dataset = []

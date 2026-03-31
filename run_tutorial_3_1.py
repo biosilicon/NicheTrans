@@ -26,7 +26,10 @@ print("==========\nArgs:{}\n==========".format(args))
 
 # Initialize dataloaders and NicheTrans
 dataset = SMA(path_img=args.path_img, rna_path=args.rna_path, msi_path=args.msi_path,
-              n_top_genes=args.n_source, n_top_targets=args.n_target)
+              n_top_genes=args.n_source, n_top_targets=args.n_target,
+              cell_type_visualize=args.cell_type_visualize,
+              cell_type_visualization_dir=args.cell_type_visualization_dir,
+              cell_type_visualization_dpi=args.cell_type_visualization_dpi)
 trainloader, testloader = sma_dataloader(args, dataset)
 
 source_dimension, target_dimension = dataset.rna_length, dataset.msi_length

@@ -96,7 +96,17 @@ def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius
 class SMA(object):
     """Dataset manager for the SMA slides used by the project."""
 
-    def __init__(self, path_img, rna_path, msi_path, n_top_genes=3000, n_top_targets=50):
+    def __init__(
+        self,
+        path_img,
+        rna_path,
+        msi_path,
+        n_top_genes=3000,
+        n_top_targets=50,
+        cell_type_visualize=False,
+        cell_type_visualization_dir=None,
+        cell_type_visualization_dpi=150,
+    ):
 
         training_slides = ['V11L12-109_B1', 'V11L12-109_C1']
         testing_slides = ['V11L12-109_A1']
@@ -148,6 +158,9 @@ class SMA(object):
             adata_list=rna_adata_list,
             slice_names=all_slides,
             feature_masks=self.rna_mask,
+            visualize=cell_type_visualize,
+            visualization_dir=cell_type_visualization_dir,
+            visualization_dpi=cell_type_visualization_dpi,
             verbose=True,
         )
         self.cell_type_source = cell_type_info['source']
@@ -158,12 +171,15 @@ class SMA(object):
         self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
         self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
         self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.cell_type_visualization_paths = cell_type_info.get('visualization_paths', {})
         self.n_spot_types = cell_type_info['n_cell_types']
         self.n_cell_types = self.n_spot_types
         self.global_mapping = self.local_cell_type_to_global_id
 
         print(f'  Global cell-type source: {self.cell_type_source}')
         print(f'  Total global cell types used for embedding: {self.n_spot_types}')
+        if self.cell_type_visualization_paths:
+            print(f'  Cell-type visualization slices: {sorted(self.cell_type_visualization_paths)}')
 
         self.training = self._process_data(
             rna_adata_list[0:2], msi_adata_list[0:2],

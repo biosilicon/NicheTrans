@@ -94,7 +94,16 @@ def _resolve_protein_columns(adata):
 
 
 class AD_Mouse(object):
-    def __init__(self, AD_adata_path, Wild_type_adata_path, n_top_genes=3000, testing_control=False):
+    def __init__(
+        self,
+        AD_adata_path,
+        Wild_type_adata_path,
+        n_top_genes=3000,
+        testing_control=False,
+        cell_type_visualize=False,
+        cell_type_visualization_dir=None,
+        cell_type_visualization_dpi=150,
+    ):
 
         training_slides = ['13months-disease-replicate_1_random.h5ad']
         testing_slides = ['13months-disease-replicate_2_random.h5ad']
@@ -127,6 +136,10 @@ class AD_Mouse(object):
             slice_names=all_slides,
             annotation_key=self.cell_type,
             candidate_annotation_keys=[self.cell_type],
+            feature_masks=self.rna_mask,
+            visualize=cell_type_visualize,
+            visualization_dir=cell_type_visualization_dir,
+            visualization_dpi=cell_type_visualization_dpi,
             verbose=True,
         )
         self.cell_type_source = cell_type_info['source']
@@ -137,6 +150,7 @@ class AD_Mouse(object):
         self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
         self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
         self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.cell_type_visualization_paths = cell_type_info.get('visualization_paths', {})
         self.n_spot_types = cell_type_info['n_cell_types']
         self.n_cell_types = self.n_spot_types
 
@@ -169,6 +183,8 @@ class AD_Mouse(object):
         print('  ------------------------------')
         print(f'  Global cell-type source: {self.cell_type_source}')
         print(f'  Global cell types ({self.n_spot_types}): {self.cell_mask.tolist()}')
+        if self.cell_type_visualization_paths:
+            print(f'  Cell-type visualization slices: {sorted(self.cell_type_visualization_paths)}')
 
     def _process_data(self, adata_list, slides, WT=False):
         """Build per-spot sample tuples.

@@ -63,7 +63,14 @@ def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius
 
 
 class Lymph_node(object):
-    def __init__(self, adata_path, n_top_genes=3000):
+    def __init__(
+        self,
+        adata_path,
+        n_top_genes=3000,
+        cell_type_visualize=False,
+        cell_type_visualization_dir=None,
+        cell_type_visualization_dpi=150,
+    ):
 
         training_slides = ['slice1']
         testing_slides = ['slice2']
@@ -132,6 +139,9 @@ class Lymph_node(object):
             adata_list=all_rna_adatas,
             slice_names=all_slides,
             feature_masks=None,
+            visualize=cell_type_visualize,
+            visualization_dir=cell_type_visualization_dir,
+            visualization_dpi=cell_type_visualization_dpi,
             verbose=True,
         )
         self.cell_type_source = cell_type_info['source']
@@ -142,6 +152,7 @@ class Lymph_node(object):
         self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
         self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
         self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.cell_type_visualization_paths = cell_type_info.get('visualization_paths', {})
         self.n_spot_types = cell_type_info['n_cell_types']
         self.n_cell_types = self.n_spot_types
         self.global_mapping = self.local_cell_type_to_global_id
@@ -167,6 +178,8 @@ class Lymph_node(object):
         print('  ------------------------------')
         print(f'  Global cell-type source: {self.cell_type_source}')
         print(f'  Total global cell types used for embedding: {self.n_spot_types}')
+        if self.cell_type_visualization_paths:
+            print(f'  Cell-type visualization slices: {sorted(self.cell_type_visualization_paths)}')
 
     def _dictionary_data(self, adata):
         dictionary = {}

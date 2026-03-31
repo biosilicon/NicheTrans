@@ -18,6 +18,12 @@ def generate_args():
     parser.add_argument('--path_img', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used/patches', type=str)
     parser.add_argument('--rna_path', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used', type=str)
     parser.add_argument('--msi_path', default='/mnt/datadisk0/Processed_DATA/2023_nbt_SMA/Processed_data_used', type=str)
+    parser.add_argument('--cell-type-visualize', action='store_true',
+                        help='generate Scanpy cell-type visualization figures during dataset preparation')
+    parser.add_argument('--cell-type-visualization-dir', default=None, type=str,
+                        help='directory for Scanpy cell-type visualization outputs')
+    parser.add_argument('--cell-type-visualization-dpi', default=150, type=int,
+                        help='dpi used when saving Scanpy cell-type visualization figures')
 
     # Training options
     parser.add_argument('--max-epoch', default=40, type=int,

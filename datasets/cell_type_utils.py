@@ -1,3 +1,6 @@
+from pathlib import Path
+
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -69,7 +72,18 @@ def detect_cell_type_annotation_key(
 ####################################################################
 
 
-def encode_annotation_cell_types(adata_list, slice_names, annotation_key, verbose=True):
+def encode_annotation_cell_types(
+    adata_list,
+    slice_names,
+    annotation_key,
+    feature_masks=None,
+    n_pcs=30,
+    n_neighbors=15,
+    visualize=False,
+    visualization_dir=None,
+    visualization_dpi=150,
+    verbose=True,
+):
     # Build one global label-to-id mapping shared by all slices.
     global_names = sorted(
         {
@@ -101,6 +115,27 @@ def encode_annotation_cell_types(adata_list, slice_names, annotation_key, verbos
             f'with {len(global_names)} global cell types'
         )
 
+    visualization_paths = {}
+    if visualize:
+        feature_masks = _resolve_feature_masks(adata_list, feature_masks)
+        resolved_visualization_dir = visualization_dir or 'scanpy_cell_type_visualizations'
+        visualization_paths = _generate_visualization_outputs(
+            adata_list=adata_list,
+            slice_names=slice_names,
+            feature_masks=feature_masks,
+            local_labels_by_slice=local_labels_by_slice,
+            global_ids_by_slice=global_ids_by_slice,
+            global_names=np.asarray(global_names, dtype=object),
+            n_pcs=n_pcs,
+            n_neighbors=n_neighbors,
+            visualization_dir=resolved_visualization_dir,
+            visualization_dpi=visualization_dpi,
+            verbose=verbose,
+        )
+
+        if verbose:
+            print(f'  Scanpy visualizations saved to: {resolved_visualization_dir}')
+
     return {
         'source': 'annotation',
         'annotation_key': annotation_key,
@@ -115,6 +150,7 @@ def encode_annotation_cell_types(adata_list, slice_names, annotation_key, verbos
             'strategy': 'provided_annotation',
             'annotation_key': annotation_key,
         },
+        'visualization_paths': visualization_paths,
     }
 
 
@@ -159,6 +195,127 @@ def _cluster_centroids(adata, local_ids, n_local_types):
     return centroids
 
 
+def _compute_embedding(adata, n_pcs, n_neighbors):
+    # Keep Scanpy parameters within the slice-specific data limits.
+    max_pcs = min(
+        n_pcs,
+        max(1, adata.n_vars),
+        max(1, adata.n_obs - 1),
+    )
+    max_neighbors = min(n_neighbors, max(1, adata.n_obs - 1))
+
+    sc.pp.pca(adata, n_comps=max_pcs)
+    sc.pp.neighbors(adata, n_neighbors=max_neighbors, n_pcs=max_pcs)
+
+    return max_pcs, max_neighbors
+
+
+def _ensure_spatial_basis(adata):
+    if 'spatial' in adata.obsm:
+        return True
+
+    if {'array_row', 'array_col'}.issubset(adata.obs.columns):
+        adata.obsm['spatial'] = adata.obs[['array_col', 'array_row']].to_numpy(dtype=np.float32)
+        return True
+
+    return False
+
+
+def _save_cluster_visualizations(
+    adata,
+    slice_name,
+    output_dir,
+    color_keys,
+    dpi=150,
+    verbose=True,
+):
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    plot_paths = {}
+
+    try:
+        if 'X_umap' not in adata.obsm:
+            sc.tl.umap(adata)
+
+        umap_path = output_dir / f'{slice_name}_umap_cell_types.png'
+        sc.pl.umap(
+            adata,
+            color=color_keys,
+            title=[f'{slice_name}: {key}' for key in color_keys],
+            frameon=False,
+            show=False,
+        )
+        plt.savefig(umap_path, bbox_inches='tight', dpi=dpi)
+        plt.close('all')
+        plot_paths['umap'] = str(umap_path)
+
+        if _ensure_spatial_basis(adata):
+            spatial_path = output_dir / f'{slice_name}_spatial_cell_types.png'
+            sc.pl.embedding(
+                adata,
+                basis='spatial',
+                color=color_keys,
+                title=[f'{slice_name} spatial: {key}' for key in color_keys],
+                frameon=False,
+                show=False,
+            )
+            plt.savefig(spatial_path, bbox_inches='tight', dpi=dpi)
+            plt.close('all')
+            plot_paths['spatial'] = str(spatial_path)
+        elif verbose:
+            print(f'  Slice {slice_name}: skipped spatial plot because no spatial coordinates were found')
+    except Exception as exc:
+        plt.close('all')
+        if verbose:
+            print(f'  Slice {slice_name}: failed to generate Scanpy plots ({exc})')
+
+    return plot_paths
+
+
+def _generate_visualization_outputs(
+    adata_list,
+    slice_names,
+    feature_masks,
+    local_labels_by_slice,
+    global_ids_by_slice,
+    global_names,
+    n_pcs,
+    n_neighbors,
+    visualization_dir,
+    visualization_dpi,
+    verbose=True,
+    prepared_adata_by_slice=None,
+):
+    visualization_paths = {}
+
+    for slice_name, adata, feature_mask in zip(slice_names, adata_list, feature_masks):
+        adata_plot = None
+        if prepared_adata_by_slice is not None:
+            adata_plot = prepared_adata_by_slice.get(slice_name)
+
+        if adata_plot is None:
+            adata_plot = _subset_for_clustering(adata, feature_mask)
+            _compute_embedding(adata_plot, n_pcs=n_pcs, n_neighbors=n_neighbors)
+
+        if 'X_umap' not in adata_plot.obsm:
+            sc.tl.umap(adata_plot)
+
+        local_labels = np.asarray(local_labels_by_slice[slice_name], dtype=object)
+        adata_plot.obs['local_cell_type'] = pd.Categorical(local_labels.astype(str))
+        adata_plot.obs['global_cell_type'] = pd.Categorical(global_names[global_ids_by_slice[slice_name]])
+
+        visualization_paths[slice_name] = _save_cluster_visualizations(
+            adata=adata_plot,
+            slice_name=slice_name,
+            output_dir=visualization_dir,
+            color_keys=['local_cell_type', 'global_cell_type'],
+            dpi=visualization_dpi,
+            verbose=verbose,
+        )
+
+    return visualization_paths
+
+
 def cluster_and_align_cell_types(
     adata_list,
     slice_names,
@@ -167,6 +324,9 @@ def cluster_and_align_cell_types(
     n_neighbors=15,
     resolution=0.5,
     similarity_threshold=0.5,
+    visualize=False,
+    visualization_dir=None,
+    visualization_dpi=150,
     verbose=True,
 ):
     """Cluster each slice independently and align clusters across slices.
@@ -194,6 +354,15 @@ def cluster_and_align_cell_types(
     similarity_threshold : float, optional
         Minimum cosine similarity required to match a local cluster to an
         existing global cell type across slices.
+    visualize : bool, optional
+        If True, generate Scanpy UMAP plots for each slice after clustering and
+        alignment. Spatial plots are also generated when spatial coordinates are
+        available on the AnnData object.
+    visualization_dir : str or path-like, optional
+        Directory used to save Scanpy figures when ``visualize=True``. If not
+        provided, figures are written to ``scanpy_cell_type_visualizations``.
+    visualization_dpi : int, optional
+        DPI used when saving Scanpy figures.
     verbose : bool, optional
         If True, print clustering and alignment progress information.
 
@@ -208,20 +377,12 @@ def cluster_and_align_cell_types(
     local_ids_by_slice = {}
     local_centroids_by_slice = {}
     local_type_counts = {}
+    clustered_adata_by_slice = {}
 
     for slice_name, adata, feature_mask in zip(slice_names, adata_list, feature_masks):
         adata_hvg = _subset_for_clustering(adata, feature_mask)
 
-        # Keep Scanpy parameters within the slice-specific data limits.
-        max_pcs = min(
-            n_pcs,
-            max(1, adata_hvg.n_vars),
-            max(1, adata_hvg.n_obs - 1),
-        )
-        max_neighbors = min(n_neighbors, max(1, adata_hvg.n_obs - 1))
-
-        sc.pp.pca(adata_hvg, n_comps=max_pcs)
-        sc.pp.neighbors(adata_hvg, n_neighbors=max_neighbors, n_pcs=max_pcs)
+        _compute_embedding(adata_hvg, n_pcs=n_pcs, n_neighbors=n_neighbors)
         sc.tl.leiden(adata_hvg, resolution=resolution, key_added='local_cell_type')
 
         local_ids = adata_hvg.obs['local_cell_type'].astype(int).values
@@ -232,6 +393,7 @@ def cluster_and_align_cell_types(
         local_centroids_by_slice[slice_name] = _cluster_centroids(
             adata_hvg, local_ids, n_local_types
         )
+        clustered_adata_by_slice[slice_name] = adata_hvg
 
         if verbose:
             counts = np.bincount(local_ids)
@@ -329,6 +491,27 @@ def cluster_and_align_cell_types(
     if verbose:
         print(f'  Cross-slice alignment complete: {n_cell_types} global cell types')
 
+    visualization_paths = {}
+    if visualize:
+        resolved_visualization_dir = visualization_dir or 'scanpy_cell_type_visualizations'
+        visualization_paths = _generate_visualization_outputs(
+            adata_list=adata_list,
+            slice_names=slice_names,
+            feature_masks=feature_masks,
+            local_labels_by_slice=local_ids_by_slice,
+            global_ids_by_slice=global_ids_by_slice,
+            global_names=global_names,
+            n_pcs=n_pcs,
+            n_neighbors=n_neighbors,
+            visualization_dir=resolved_visualization_dir,
+            visualization_dpi=visualization_dpi,
+            verbose=verbose,
+            prepared_adata_by_slice=clustered_adata_by_slice,
+        )
+
+        if verbose:
+            print(f'  Scanpy visualizations saved to: {resolved_visualization_dir}')
+
     return {
         'source': 'cluster_alignment',
         'annotation_key': None,
@@ -340,6 +523,7 @@ def cluster_and_align_cell_types(
         'local_labels_by_slice': local_ids_by_slice,
         'slice_local_to_global': slice_local_to_global,
         'alignment_info': alignment_info,
+        'visualization_paths': visualization_paths,
     }
 
 
@@ -353,6 +537,9 @@ def resolve_global_cell_types(
     n_neighbors=15,
     resolution=0.5,
     similarity_threshold=0.5,
+    visualize=False,
+    visualization_dir=None,
+    visualization_dpi=150,
     verbose=True,
 ):
     detected_annotation_key = annotation_key
@@ -368,6 +555,12 @@ def resolve_global_cell_types(
             adata_list=adata_list,
             slice_names=slice_names,
             annotation_key=detected_annotation_key,
+            feature_masks=feature_masks,
+            n_pcs=n_pcs,
+            n_neighbors=n_neighbors,
+            visualize=visualize,
+            visualization_dir=visualization_dir,
+            visualization_dpi=visualization_dpi,
             verbose=verbose,
         )
 
@@ -379,5 +572,8 @@ def resolve_global_cell_types(
         n_neighbors=n_neighbors,
         resolution=resolution,
         similarity_threshold=similarity_threshold,
+        visualize=visualize,
+        visualization_dir=visualization_dir,
+        visualization_dpi=visualization_dpi,
         verbose=verbose,
     )

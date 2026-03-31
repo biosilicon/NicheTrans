@@ -18,6 +18,12 @@ def generate_args():
     parser.add_argument('--hvg_gene', default=1500, type=float)
     
     parser.add_argument('--adata_path', default='/mnt/datadisk0/Processed_DATA/2023_nm_MISAR_seq', type=str)
+    parser.add_argument('--cell-type-visualize', action='store_true',
+                        help='generate Scanpy cell-type visualization figures during dataset preparation')
+    parser.add_argument('--cell-type-visualization-dir', default=None, type=str,
+                        help='directory for Scanpy cell-type visualization outputs')
+    parser.add_argument('--cell-type-visualization-dpi', default=150, type=int,
+                        help='dpi used when saving Scanpy cell-type visualization figures')
 
     # Training options
     parser.add_argument('--max-epoch', default=20, type=int,
