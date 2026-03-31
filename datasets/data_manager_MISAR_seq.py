@@ -158,10 +158,13 @@ class ATAC_RNA_Seq(object):
             'e15': atac[e15_mask] if RNA2ATAC else rna[e15_mask],
             'e18': atac[e18_mask] if RNA2ATAC else rna[e18_mask],
         }
+        alignment_slice_names = ['e13', 'e15', 'e18']
+        testing_slides = ['e15']
 
         cell_type_info = resolve_global_cell_types(
-            adata_list=[source_by_sample['e13'], source_by_sample['e15'], source_by_sample['e18']],
-            slice_names=['e13', 'e15', 'e18'],
+            adata_list=[source_by_sample[slice_name] for slice_name in alignment_slice_names],
+            slice_names=alignment_slice_names,
+            testing_slides=testing_slides,
             visualize=cell_type_visualize,
             visualization_dir=cell_type_visualization_dir,
             visualization_dpi=cell_type_visualization_dpi,

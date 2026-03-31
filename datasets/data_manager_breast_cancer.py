@@ -5,6 +5,7 @@ import pandas as pd
 import scanpy as sc
 
 from collections import defaultdict
+from datasets.cell_type_utils import resolve_global_cell_types
 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True, mouse=False):
     assert(model in ['Radius', 'KNN'])
@@ -66,7 +67,15 @@ def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius
 
 
 class Breast_cancer(object):
-    def __init__(self, adata_path, coordinate_path, ct_path):
+    def __init__(
+        self,
+        adata_path,
+        coordinate_path,
+        ct_path,
+        cell_type_visualize=False,
+        cell_type_visualization_dir=None,
+        cell_type_visualization_dpi=150,
+    ):
 
         adata = sc.read_h5ad(adata_path)
         coordinates = pd.read_csv(coordinate_path, compression='gzip')
@@ -91,10 +100,36 @@ class Breast_cancer(object):
         centra = adata.obs['x'].values.max()//2
         training_adata = adata[ adata.obs['x'].values <= centra ]
         testing_adata = adata[ adata.obs['x'].values >= centra ]
+        training_slides = ['training_slice']
+        testing_slides = ['testing_slice']
+
+        cell_type_info = resolve_global_cell_types(
+            adata_list=[training_adata, testing_adata],
+            slice_names=training_slides + testing_slides,
+            annotation_key='ct',
+            candidate_annotation_keys=['ct'],
+            testing_slides=testing_slides,
+            visualize=cell_type_visualize,
+            visualization_dir=cell_type_visualization_dir,
+            visualization_dpi=cell_type_visualization_dpi,
+            verbose=True,
+        )
+        self.cell_type_source = cell_type_info['source']
+        self.cell_type_annotation_key = cell_type_info['annotation_key']
+        self.cell_mask = cell_type_info['cell_type_names']
+        self.cell_type_to_id = cell_type_info['name_to_id']
+        self.global_cell_type_id_to_name = cell_type_info['id_to_name']
+        self.global_cell_type_ids_by_slice = cell_type_info['global_cell_type_ids_by_slice']
+        self.local_cell_type_to_global_id = cell_type_info['slice_local_to_global']
+        self.cell_type_alignment_info = cell_type_info['alignment_info']
+        self.cell_type_visualization_paths = cell_type_info.get('visualization_paths', {})
+        self.n_spot_types = cell_type_info['n_cell_types']
+        self.n_cell_types = self.n_spot_types
+        self.global_mapping = self.local_cell_type_to_global_id
 
         ########
-        self.training = self._process_data(training_adata)
-        self.testing = self._process_data(testing_adata)
+        self.training = self._process_data(training_adata, training_slides[0])
+        self.testing = self._process_data(testing_adata, testing_slides[0])
 
         self.rna_length, self.protein_length = 313, 2
         self.target_panel = np.array(['CD20', 'HER2'])
@@ -110,16 +145,20 @@ class Breast_cancer(object):
         print("  train    |  {:5d} spots, {} positive CD20, {} positive HER2 ".format(num_training_spots, (training_adata.obs['cell_CD20_mean'].values > 0).sum(), (training_adata.obs['cell_HER2_mean'].values > 0).sum()))
         print("  test     |  {:5d} spots, {} positive CD20, {} positive HER2 ".format(num_testing_spots, (testing_adata.obs['cell_CD20_mean'].values > 0).sum(), (testing_adata.obs['cell_HER2_mean'].values > 0).sum()))
         print("  ------------------------------")
+        print(f'  Global cell-type source: {self.cell_type_source}')
+        print(f'  Total global cell types used for embedding: {self.n_spot_types}')
+        if self.cell_type_visualization_paths:
+            print(f'  Cell-type visualization slices: {sorted(self.cell_type_visualization_paths)}')
 
 
-    def _process_data(self, rna_adata):
+    def _process_data(self, rna_adata, slide_name):
         dataset = []
         
         ######
         rna_array = rna_adata.X.toarray()
-        ct_array = rna_adata.obs['ct'].values
         indexes = rna_adata.obs.index.tolist()
         proteins = rna_adata.obs[['cell_CD20_mean', 'cell_HER2_mean']].values.astype(np.float32)
+        global_cell_type_ids = self.global_cell_type_ids_by_slice[slide_name]
         ######
         graph = Cal_Spatial_Net_row_col(rna_adata, k_cutoff=12, model='KNN', mouse=True)
 
@@ -127,8 +166,10 @@ class Breast_cancer(object):
         dict_rna, dict_ct, dict_spot_type = {}, {}, {}
         for i, index in enumerate(indexes):
             dict_rna[index] = rna_array[i]
-            dict_ct[index] = (ct_array[i] == self.cell_mask) * 1
-            dict_spot_type[index] = self.cell_type_to_id[ct_array[i]]
+            cell_onehot = np.zeros(self.n_cell_types, dtype=np.float32)
+            cell_onehot[int(global_cell_type_ids[i])] = 1.0
+            dict_ct[index] = cell_onehot
+            dict_spot_type[index] = int(global_cell_type_ids[i])
         #######
         
         for i in range(rna_adata.shape[0]):

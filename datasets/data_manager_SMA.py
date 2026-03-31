@@ -158,6 +158,7 @@ class SMA(object):
             adata_list=rna_adata_list,
             slice_names=all_slides,
             feature_masks=self.rna_mask,
+            testing_slides=testing_slides,
             visualize=cell_type_visualize,
             visualization_dir=cell_type_visualization_dir,
             visualization_dpi=cell_type_visualization_dpi,

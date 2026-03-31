@@ -139,6 +139,7 @@ class Lymph_node(object):
             adata_list=all_rna_adatas,
             slice_names=all_slides,
             feature_masks=None,
+            testing_slides=testing_slides,
             visualize=cell_type_visualize,
             visualization_dir=cell_type_visualization_dir,
             visualization_dpi=cell_type_visualization_dpi,

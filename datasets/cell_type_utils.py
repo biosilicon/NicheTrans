@@ -77,6 +77,8 @@ def encode_annotation_cell_types(
     slice_names,
     annotation_key,
     feature_masks=None,
+    reference_slice=None,
+    testing_slides=None,
     n_pcs=30,
     n_neighbors=15,
     visualize=False,
@@ -84,14 +86,28 @@ def encode_annotation_cell_types(
     visualization_dpi=150,
     verbose=True,
 ):
-    # Build one global label-to-id mapping shared by all slices.
-    global_names = sorted(
+    resolved_reference_slice = _resolve_reference_slice(
+        slice_names,
+        reference_slice=reference_slice,
+        testing_slides=testing_slides,
+    )
+    labels_by_slice = {}
+    for slice_name, adata in zip(slice_names, adata_list):
+        labels_by_slice[slice_name] = _sanitize_labels(adata.obs[annotation_key].values)
+
+    # Anchor annotation IDs to the reference slice, then append any labels that
+    # appear only in the remaining slices to preserve a shared global space.
+    reference_names = sorted(set(labels_by_slice[resolved_reference_slice].tolist()))
+    remaining_names = sorted(
         {
             label
-            for adata in adata_list
-            for label in _sanitize_labels(adata.obs[annotation_key].values).tolist()
+            for slice_name, labels in labels_by_slice.items()
+            if slice_name != resolved_reference_slice
+            for label in labels.tolist()
+            if label not in reference_names
         }
     )
+    global_names = reference_names + remaining_names
     name_to_id = {name: idx for idx, name in enumerate(global_names)}
     id_to_name = {idx: name for name, idx in name_to_id.items()}
 
@@ -100,7 +116,7 @@ def encode_annotation_cell_types(
     slice_local_to_global = {}
 
     for slice_name, adata in zip(slice_names, adata_list):
-        labels = _sanitize_labels(adata.obs[annotation_key].values)
+        labels = labels_by_slice[slice_name]
         global_ids = np.asarray([name_to_id[label] for label in labels], dtype=np.int64)
 
         global_ids_by_slice[slice_name] = global_ids
@@ -149,6 +165,7 @@ def encode_annotation_cell_types(
         'alignment_info': {
             'strategy': 'provided_annotation',
             'annotation_key': annotation_key,
+            'reference_slice': resolved_reference_slice,
         },
         'visualization_paths': visualization_paths,
     }
@@ -163,6 +180,49 @@ def _resolve_feature_masks(adata_list, feature_masks):
         return list(feature_masks)
 
     return [feature_masks] * len(adata_list)
+
+
+def _normalize_slice_selection(slice_selection):
+    if slice_selection is None:
+        return []
+
+    if isinstance(slice_selection, str):
+        return [slice_selection]
+
+    return list(slice_selection)
+
+
+def _resolve_reference_slice(slice_names, reference_slice=None, testing_slides=None):
+    slice_names = list(slice_names)
+    if len(slice_names) == 0:
+        raise ValueError('slice_names must contain at least one slice')
+
+    if reference_slice is not None:
+        if reference_slice not in slice_names:
+            raise ValueError(
+                f'reference_slice "{reference_slice}" was not found in slice_names'
+            )
+        return reference_slice
+
+    testing_slide_names = _normalize_slice_selection(testing_slides)
+    if testing_slide_names:
+        matching_testing_slides = [
+            slice_name for slice_name in testing_slide_names if slice_name in slice_names
+        ]
+        if not matching_testing_slides:
+            raise ValueError(
+                'None of the provided testing_slides were found in slice_names'
+            )
+        return matching_testing_slides[0]
+
+    return slice_names[0]
+
+
+def _get_alignment_slice_order(slice_names, reference_slice):
+    slice_names = list(slice_names)
+    return [reference_slice] + [
+        slice_name for slice_name in slice_names if slice_name != reference_slice
+    ]
 
 
 def _subset_for_clustering(adata, feature_mask):
@@ -320,6 +380,8 @@ def cluster_and_align_cell_types(
     adata_list,
     slice_names,
     feature_masks=None,
+    reference_slice=None,
+    testing_slides=None,
     n_pcs=30,
     n_neighbors=15,
     resolution=0.5,
@@ -341,6 +403,14 @@ def cluster_and_align_cell_types(
         Feature-selection mask(s) used before clustering. If a single mask is
         provided, it is shared across all slices; if a list is provided, each
         slice uses its own mask.
+    reference_slice : str, optional
+        Slice name whose local clusters seed the global cell-type ID space.
+        When omitted, ``testing_slides`` is used if provided; otherwise the
+        first entry in ``slice_names`` is used for backward compatibility.
+    testing_slides : str or sequence of str, optional
+        Testing slice name(s). When ``reference_slice`` is not provided, the
+        first testing slice present in ``slice_names`` becomes the reference
+        slice for the global cell-type space.
     n_pcs : int, optional
         Target number of principal components used for PCA and neighborhood
         graph construction. The effective value is clipped to each slice's
@@ -373,6 +443,12 @@ def cluster_and_align_cell_types(
         to global mapping, generated global names, and alignment metadata.
     """
     feature_masks = _resolve_feature_masks(adata_list, feature_masks)
+    reference_slice = _resolve_reference_slice(
+        slice_names,
+        reference_slice=reference_slice,
+        testing_slides=testing_slides,
+    )
+    alignment_slice_order = _get_alignment_slice_order(slice_names, reference_slice)
 
     local_ids_by_slice = {}
     local_centroids_by_slice = {}
@@ -405,22 +481,21 @@ def cluster_and_align_cell_types(
     slice_local_to_global = {}
     alignment_info = {
         'strategy': 'cluster_centroid_cosine',
-        'reference_slice': slice_names[0],
+        'reference_slice': reference_slice,
         'similarity_threshold': similarity_threshold,
         'matches': {},
         'local_type_counts': local_type_counts,
     }
 
-    reference_slice = slice_names[0]
     reference_centroids = local_centroids_by_slice[reference_slice]
-    # Seed the global cell-type space from the first slice.
+    # Seed the global cell-type space from the resolved reference slice.
     global_centroids = [reference_centroids[idx].copy() for idx in range(reference_centroids.shape[0])]
     global_counts = [1] * len(global_centroids)
 
     for local_id in range(local_type_counts[reference_slice]):
         slice_local_to_global[(reference_slice, local_id)] = local_id
 
-    for slice_name in slice_names[1:]:
+    for slice_name in alignment_slice_order[1:]:
         current_centroids = local_centroids_by_slice[slice_name]
         sim_matrix = cosine_similarity(current_centroids, np.stack(global_centroids, axis=0))
         # Find the best one-to-one local/global matches, then filter weak ones.
@@ -533,6 +608,8 @@ def resolve_global_cell_types(
     feature_masks=None,
     annotation_key=None,
     candidate_annotation_keys=None,
+    reference_slice=None,
+    testing_slides=None,
     n_pcs=30,
     n_neighbors=15,
     resolution=0.5,
@@ -556,6 +633,8 @@ def resolve_global_cell_types(
             slice_names=slice_names,
             annotation_key=detected_annotation_key,
             feature_masks=feature_masks,
+            reference_slice=reference_slice,
+            testing_slides=testing_slides,
             n_pcs=n_pcs,
             n_neighbors=n_neighbors,
             visualize=visualize,
@@ -568,6 +647,8 @@ def resolve_global_cell_types(
         adata_list=adata_list,
         slice_names=slice_names,
         feature_masks=feature_masks,
+        reference_slice=reference_slice,
+        testing_slides=testing_slides,
         n_pcs=n_pcs,
         n_neighbors=n_neighbors,
         resolution=resolution,

@@ -137,6 +137,7 @@ class AD_Mouse(object):
             annotation_key=self.cell_type,
             candidate_annotation_keys=[self.cell_type],
             feature_masks=self.rna_mask,
+            testing_slides=testing_slides,
             visualize=cell_type_visualize,
             visualization_dir=cell_type_visualization_dir,
             visualization_dpi=cell_type_visualization_dpi,
