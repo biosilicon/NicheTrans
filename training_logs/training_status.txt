@@ -24,3 +24,29 @@
 [2026-03-30 00:32:19] FAILED(1)| Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb  -- see /mnt/datadisk0/vic/cluster/NicheTrans/training_logs/Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).log
 [2026-03-30 00:46:43] SUCCESS   | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb
 [2026-03-30 00:46:43] === All training jobs finished ===
+[2026-03-31 15:53:09] === Training started | 8 notebooks queued | MAX_JOBS=2 ===
+[2026-03-31 15:53:09] LAUNCHED  | Tutorial_3.1__Train_NicheTrans_on_SMA_data.ipynb  (PID=12209  running=1/2)
+[2026-03-31 15:53:09] STARTED   | Tutorial_3.1__Train_NicheTrans_on_SMA_data.ipynb
+[2026-03-31 15:53:09] LAUNCHED  | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb  (PID=12216  running=2/2)
+[2026-03-31 15:53:09] STARTED   | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb
+[2026-03-31 16:13:56] SUCCESS   | Tutorial_3.1__Train_NicheTrans_on_SMA_data.ipynb
+[2026-03-31 16:14:01] LAUNCHED  | Tutorial_5.1__Train_NicheTrans_on_STARmap_PLUS_data.ipynb  (PID=19963  running=2/2)
+[2026-03-31 16:14:01] STARTED   | Tutorial_5.1__Train_NicheTrans_on_STARmap_PLUS_data.ipynb
+[2026-03-31 16:20:32] SUCCESS   | Tutorial_5.1__Train_NicheTrans_on_STARmap_PLUS_data.ipynb
+[2026-03-31 16:20:37] LAUNCHED  | Tutorial_6.1__Train_NicheTrans_STAR__on_STARmap_PLUS_data.ipynb  (PID=78769  running=2/2)
+[2026-03-31 16:20:37] STARTED   | Tutorial_6.1__Train_NicheTrans_STAR__on_STARmap_PLUS_data.ipynb
+[2026-03-31 16:25:56] SUCCESS   | Tutorial_6.1__Train_NicheTrans_STAR__on_STARmap_PLUS_data.ipynb
+[2026-03-31 16:25:57] LAUNCHED  | Tutorial_7.1__Train_NicheTrans_on_10x_Xenium_data.ipynb  (PID=137253  running=2/2)
+[2026-03-31 16:25:57] STARTED   | Tutorial_7.1__Train_NicheTrans_on_10x_Xenium_data.ipynb
+[2026-03-31 18:53:22] SUCCESS   | Tutorial_7.1__Train_NicheTrans_on_10x_Xenium_data.ipynb
+[2026-03-31 18:53:27] LAUNCHED  | Tutorial_8.1__Train_NicheTrans_on_human_lymph_node_data.ipynb  (PID=189383  running=2/2)
+[2026-03-31 18:53:27] STARTED   | Tutorial_8.1__Train_NicheTrans_on_human_lymph_node_data.ipynb
+[2026-03-31 18:55:12] SUCCESS   | Tutorial_8.1__Train_NicheTrans_on_human_lymph_node_data.ipynb
+[2026-03-31 18:55:13] LAUNCHED  | Tutorial_9.1__Train_&_test_NicheTrans_on_MISAR-seq(atac2rna).ipynb  (PID=190353  running=2/2)
+[2026-03-31 18:55:13] STARTED   | Tutorial_9.1__Train_&_test_NicheTrans_on_MISAR-seq(atac2rna).ipynb
+[2026-03-31 18:55:19] FAILED(1)| Tutorial_9.1__Train_&_test_NicheTrans_on_MISAR-seq(atac2rna).ipynb  -- see /mnt/datadisk0/vic/cluster/NicheTrans/training_logs/Tutorial_9.1__Train_&_test_NicheTrans_on_MISAR-seq(atac2rna).log
+[2026-03-31 18:55:23] LAUNCHED  | Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb  (PID=190500  running=2/2)
+[2026-03-31 18:55:23] STARTED   | Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb
+[2026-03-31 18:55:28] FAILED(1)| Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb  -- see /mnt/datadisk0/vic/cluster/NicheTrans/training_logs/Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).log
+[2026-03-31 19:41:35] SUCCESS   | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb
+[2026-03-31 19:41:35] === All training jobs finished ===

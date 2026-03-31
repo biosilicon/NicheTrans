@@ -50,3 +50,4 @@ Thumbs.db
 # Misc
 *.log
 .smoke_test_outputs/
+weight/
