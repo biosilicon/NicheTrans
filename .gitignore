@@ -51,3 +51,5 @@ Thumbs.db
 *.log
 .smoke_test_outputs/
 weight/
+scanpy_cell_type_visualizations/
+train_some.sh
