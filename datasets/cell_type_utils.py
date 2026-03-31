@@ -5,7 +5,6 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-from scipy.optimize import linear_sum_assignment
 from scipy.sparse import issparse
 from sklearn.metrics.pairwise import cosine_similarity
 
@@ -197,18 +196,23 @@ def _resolve_reference_slice(slice_names, reference_slice=None, testing_slides=N
     if len(slice_names) == 0:
         raise ValueError('slice_names must contain at least one slice')
 
+    testing_slide_names = _normalize_slice_selection(testing_slides)
+    matching_testing_slides = [
+        slice_name for slice_name in testing_slide_names if slice_name in slice_names
+    ]
+
     if reference_slice is not None:
         if reference_slice not in slice_names:
             raise ValueError(
                 f'reference_slice "{reference_slice}" was not found in slice_names'
             )
+        if matching_testing_slides and reference_slice not in matching_testing_slides:
+            raise ValueError(
+                'reference_slice must belong to testing_slides when testing_slides are provided'
+            )
         return reference_slice
 
-    testing_slide_names = _normalize_slice_selection(testing_slides)
     if testing_slide_names:
-        matching_testing_slides = [
-            slice_name for slice_name in testing_slide_names if slice_name in slice_names
-        ]
         if not matching_testing_slides:
             raise ValueError(
                 'None of the provided testing_slides were found in slice_names'
@@ -253,6 +257,54 @@ def _cluster_centroids(adata, local_ids, n_local_types):
         centroids[local_id] = X[mask].mean(axis=0)
 
     return centroids
+
+
+def _align_local_centroids_to_reference(
+    current_centroids,
+    reference_centroids,
+    slice_name,
+    similarity_threshold,
+    verbose=True,
+):
+    """Map every local cluster onto the fixed reference cell-type space.
+
+    The reference centroids define the only allowed global cell-type IDs. Each
+    local cluster is assigned to its most similar reference centroid, allowing
+    many-to-one merges when a slice contains more local clusters than the
+    reference slice.
+    """
+    sim_matrix = cosine_similarity(current_centroids, reference_centroids)
+    local_to_global = {}
+    slice_matches = []
+    low_similarity_local_ids = []
+
+    for local_id in range(current_centroids.shape[0]):
+        global_id = int(np.argmax(sim_matrix[local_id]))
+        similarity = float(sim_matrix[local_id, global_id])
+        below_threshold = similarity < similarity_threshold
+
+        local_to_global[local_id] = global_id
+        if below_threshold:
+            low_similarity_local_ids.append(int(local_id))
+
+        slice_matches.append(
+            {
+                'local_cluster_id': int(local_id),
+                'global_cell_type_id': global_id,
+                'similarity': similarity,
+                'below_threshold': bool(below_threshold),
+            }
+        )
+
+        if verbose:
+            threshold_note = ' [below threshold; forced merge]' if below_threshold else ''
+            print(
+                f'    Align slice={slice_name} local_cluster={local_id} '
+                f'-> reference/global={global_id} cosine_similarity={similarity:.4f}'
+                f'{threshold_note}'
+            )
+
+    return local_to_global, slice_matches, low_similarity_local_ids
 
 
 def _compute_embedding(adata, n_pcs, n_neighbors):
@@ -404,13 +456,13 @@ def cluster_and_align_cell_types(
         provided, it is shared across all slices; if a list is provided, each
         slice uses its own mask.
     reference_slice : str, optional
-        Slice name whose local clusters seed the global cell-type ID space.
-        When omitted, ``testing_slides`` is used if provided; otherwise the
-        first entry in ``slice_names`` is used for backward compatibility.
+        Slice name whose local clusters define the fixed global cell-type ID
+        space. When omitted, ``testing_slides`` is used if provided; otherwise
+        the first entry in ``slice_names`` is used for backward compatibility.
     testing_slides : str or sequence of str, optional
         Testing slice name(s). When ``reference_slice`` is not provided, the
         first testing slice present in ``slice_names`` becomes the reference
-        slice for the global cell-type space.
+        slice. All remaining slices are mapped into that fixed reference space.
     n_pcs : int, optional
         Target number of principal components used for PCA and neighborhood
         graph construction. The effective value is clipped to each slice's
@@ -422,8 +474,10 @@ def cluster_and_align_cell_types(
         Resolution parameter passed to Leiden clustering. Larger values usually
         yield more local clusters.
     similarity_threshold : float, optional
-        Minimum cosine similarity required to match a local cluster to an
-        existing global cell type across slices.
+        Diagnostic threshold used to flag low-similarity assignments. Every
+        local cluster is still mapped to its most similar reference cell type
+        so that no extra global classes are created outside the reference
+        slice.
     visualize : bool, optional
         If True, generate Scanpy UMAP plots for each slice after clustering and
         alignment. Spatial plots are also generated when spatial coordinates are
@@ -443,12 +497,14 @@ def cluster_and_align_cell_types(
         to global mapping, generated global names, and alignment metadata.
     """
     feature_masks = _resolve_feature_masks(adata_list, feature_masks)
+    requested_reference_slice = reference_slice
     reference_slice = _resolve_reference_slice(
         slice_names,
         reference_slice=reference_slice,
         testing_slides=testing_slides,
     )
     alignment_slice_order = _get_alignment_slice_order(slice_names, reference_slice)
+    testing_slide_names = _normalize_slice_selection(testing_slides)
 
     local_ids_by_slice = {}
     local_centroids_by_slice = {}
@@ -483,73 +539,69 @@ def cluster_and_align_cell_types(
         'strategy': 'cluster_centroid_cosine',
         'reference_slice': reference_slice,
         'similarity_threshold': similarity_threshold,
+        'reference_policy': (
+            'explicit_reference_slice'
+            if requested_reference_slice is not None
+            else 'first_testing_slice' if testing_slide_names else 'first_input_slice'
+        ),
+        'testing_slides': testing_slide_names,
+        'global_space_fixed_to_reference': True,
         'matches': {},
         'local_type_counts': local_type_counts,
     }
 
     reference_centroids = local_centroids_by_slice[reference_slice]
-    # Seed the global cell-type space from the resolved reference slice.
-    global_centroids = [reference_centroids[idx].copy() for idx in range(reference_centroids.shape[0])]
-    global_counts = [1] * len(global_centroids)
+    n_cell_types = reference_centroids.shape[0]
 
     for local_id in range(local_type_counts[reference_slice]):
         slice_local_to_global[(reference_slice, local_id)] = local_id
 
+    alignment_info['matches'][reference_slice] = {
+        'matched': [
+            {
+                'local_cluster_id': int(local_id),
+                'global_cell_type_id': int(local_id),
+                'similarity': 1.0,
+                'below_threshold': False,
+            }
+            for local_id in range(local_type_counts[reference_slice])
+        ],
+        'unmatched_local_cluster_ids': [],
+        'low_similarity_local_cluster_ids': [],
+    }
+
+    if verbose:
+        print(
+            f'  Reference slice {reference_slice} defines the fixed global cell-type space '
+            f'with {n_cell_types} classes'
+        )
+
     for slice_name in alignment_slice_order[1:]:
         current_centroids = local_centroids_by_slice[slice_name]
-        sim_matrix = cosine_similarity(current_centroids, np.stack(global_centroids, axis=0))
-        # Find the best one-to-one local/global matches, then filter weak ones.
-        row_ind, col_ind = linear_sum_assignment(1.0 - sim_matrix)
+        local_to_global, slice_matches, low_similarity_local_ids = _align_local_centroids_to_reference(
+            current_centroids=current_centroids,
+            reference_centroids=reference_centroids,
+            slice_name=slice_name,
+            similarity_threshold=similarity_threshold,
+            verbose=verbose,
+        )
 
-        matched_rows = set()
-        slice_matches = []
-
-        for row_idx, global_idx in zip(row_ind.tolist(), col_ind.tolist()):
-            similarity = float(sim_matrix[row_idx, global_idx])
-            if similarity < similarity_threshold:
-                continue
-
-            slice_local_to_global[(slice_name, row_idx)] = global_idx
-            matched_rows.add(row_idx)
-            slice_matches.append(
-                {
-                    'local_cluster_id': int(row_idx),
-                    'global_cell_type_id': int(global_idx),
-                    'similarity': similarity,
-                }
-            )
-
-            old_count = global_counts[global_idx]
-            # Update the global centroid with an incremental mean after a match.
-            global_centroids[global_idx] = (
-                (global_centroids[global_idx] * old_count) + current_centroids[row_idx]
-            ) / (old_count + 1)
-            global_counts[global_idx] = old_count + 1
-
-        unmatched_local_ids = []
-        for local_id in range(local_type_counts[slice_name]):
-            if local_id in matched_rows:
-                continue
-
-            # Unmatched local clusters become new global cell types.
-            new_global_id = len(global_centroids)
-            slice_local_to_global[(slice_name, local_id)] = new_global_id
-            global_centroids.append(current_centroids[local_id].copy())
-            global_counts.append(1)
-            unmatched_local_ids.append(int(local_id))
+        for local_id, global_id in local_to_global.items():
+            slice_local_to_global[(slice_name, local_id)] = global_id
 
         alignment_info['matches'][slice_name] = {
             'matched': slice_matches,
-            'unmatched_local_cluster_ids': unmatched_local_ids,
+            'unmatched_local_cluster_ids': [],
+            'low_similarity_local_cluster_ids': low_similarity_local_ids,
         }
 
         if verbose:
             print(
-                f'  Slice {slice_name}: matched {len(slice_matches)}/'
-                f'{local_type_counts[slice_name]} local clusters into the global space'
+                f'  Slice {slice_name}: mapped {len(slice_matches)}/'
+                f'{local_type_counts[slice_name]} local clusters into the '
+                f'{reference_slice}-defined global space'
             )
 
-    n_cell_types = len(global_centroids)
     global_names = np.asarray(
         [f'global_cell_type_{idx}' for idx in range(n_cell_types)],
         dtype=object,
