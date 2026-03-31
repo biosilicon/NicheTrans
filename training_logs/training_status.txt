@@ -24,3 +24,8 @@
 [2026-03-25 18:08:31] FAILED(1)| Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb  -- see /mnt/datadisk0/vic/NicheTrans/training_logs/Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).log
 [2026-03-25 18:13:40] SUCCESS   | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb
 [2026-03-25 18:13:40] === All training jobs finished ===
+[2026-03-29 21:20:21] === Training started | 8 notebooks queued | MAX_JOBS=2 ===
+[2026-03-29 21:20:21] LAUNCHED  | Tutorial_3.1__Train_NicheTrans_on_SMA_data.ipynb  (PID=8717  running=1/2)
+[2026-03-29 21:20:21] STARTED   | Tutorial_3.1__Train_NicheTrans_on_SMA_data.ipynb
+[2026-03-29 21:20:21] LAUNCHED  | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb  (PID=8724  running=2/2)
+[2026-03-29 21:20:21] STARTED   | Tutorial_4.1__Train_NicheTrans_STAR_on_SMA_data.ipynb
