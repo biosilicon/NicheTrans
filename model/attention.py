@@ -22,8 +22,7 @@ class PreNorm(nn.Module):
 
         if exists(self.norm_context):
             context = kwargs['context']
-            normed_context = self.norm_context(context)
-            kwargs.update(context=normed_context)
+            kwargs.update(context=self.norm_context(context))
 
         return self.fn(x, **kwargs)
 
@@ -59,7 +58,6 @@ class Self_Attention(nn.Module):
         self.to_k = nn.Sequential(nn.Linear(context_dim, inner_dim, bias=False))
         self.to_v = nn.Linear(context_dim, inner_dim, bias=False)
         self.to_out = nn.Linear(inner_dim, inner_dim)
-
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, x1, mask=None):
@@ -166,9 +164,290 @@ def apply_neighbor_mask_to_graph_meta(graph_meta, neighbor_keep_mask):
     return updated_graph_meta
 
 
-class EdgeAwareGraphSelfAttention(nn.Module):
-    def __init__(self, query_dim=512, edge_dim=11, heads=4, dim_head=64, dropout=0.):
+class PairwiseStructureBuilder(nn.Module):
+    ROLE_NAMES = ('center', 'first_hop', 'second_hop')
+    EDGE_TYPE_NAMES = ('self', 'center_edge', 'same_hop_edge', 'cross_hop_edge', 'invalid')
+
+    def __init__(
+        self,
+        num_roles=3,
+        num_direction_bins=8,
+        distance_bin_edges=(0.5, 0.9, 1.25, 1.75, 2.5, 3.5),
+        max_shortest_path_distance=4,
+        max_degree=16,
+        max_cell_types=64,
+    ):
         super().__init__()
+        self.num_roles = num_roles
+        self.num_direction_bins = num_direction_bins
+        self.max_shortest_path_distance = max_shortest_path_distance
+        self.max_degree = max_degree
+        self.max_cell_types = max_cell_types
+
+        self.register_buffer('distance_bin_edges', torch.tensor(distance_bin_edges, dtype=torch.float32))
+
+        self.continuous_dim = 6
+        self.num_distance_buckets = len(distance_bin_edges) + 3
+        self.distance_unknown_idx = self.num_distance_buckets - 1
+        self.num_direction_buckets = num_direction_bins + 2
+        self.direction_unknown_idx = self.num_direction_buckets - 1
+        self.num_role_pair_buckets = (num_roles * num_roles) + 1
+        self.role_pair_unknown_idx = self.num_role_pair_buckets - 1
+        self.num_hop_delta_buckets = num_roles + 1
+        self.hop_delta_unknown_idx = self.num_hop_delta_buckets - 1
+        self.num_edge_types = len(self.EDGE_TYPE_NAMES)
+        self.num_shortest_path_buckets = max_shortest_path_distance + 2
+        self.shortest_path_unknown_idx = self.num_shortest_path_buckets - 1
+        self.num_same_cell_type_buckets = 3
+
+    def _derive_cell_type_ids(self, cell_inf, valid_mask):
+        if cell_inf is None:
+            zeros = torch.zeros_like(valid_mask, dtype=torch.long)
+            return zeros, torch.zeros_like(valid_mask)
+
+        cell_type_valid = (cell_inf.abs().sum(dim=-1) > 0) & valid_mask
+        cell_type_ids = cell_inf.argmax(dim=-1).clamp(min=0, max=self.max_cell_types - 1) + 1
+        cell_type_ids = torch.where(cell_type_valid, cell_type_ids, torch.zeros_like(cell_type_ids))
+        return cell_type_ids, cell_type_valid
+
+    def _build_local_scale(self, node_coords, valid_mask):
+        dtype = node_coords.dtype
+        neighbor_valid_mask = valid_mask.clone()
+        neighbor_valid_mask[:, 0] = False
+
+        center_distance = torch.sqrt(node_coords[:, :, 0].pow(2) + node_coords[:, :, 1].pow(2) + 1e-8)
+        center_distance = center_distance.masked_fill(~neighbor_valid_mask, 0.0)
+        neighbor_count = neighbor_valid_mask.sum(dim=-1).clamp(min=1).to(dtype)
+        local_scale = center_distance.sum(dim=-1) / neighbor_count
+        local_scale = torch.where(local_scale > 0, local_scale, torch.ones_like(local_scale))
+        return local_scale.clamp(min=1e-6)
+
+    def _build_shortest_path_bucket(self, adjacency_mask, valid_mask):
+        batch_size, num_nodes, _ = adjacency_mask.shape
+        device = adjacency_mask.device
+        eye = torch.eye(num_nodes, device=device, dtype=torch.bool).unsqueeze(0)
+
+        inf = float(self.shortest_path_unknown_idx)
+        distance = torch.full((batch_size, num_nodes, num_nodes), inf, device=device)
+        edge_mask = adjacency_mask & ~eye
+        distance = distance.masked_fill(edge_mask, 1.0)
+        distance = torch.where(eye, torch.zeros_like(distance), distance)
+
+        for intermediate in range(num_nodes):
+            via_intermediate = (
+                distance[:, :, intermediate].unsqueeze(-1)
+                + distance[:, intermediate, :].unsqueeze(-2)
+            )
+            distance = torch.minimum(distance, via_intermediate)
+
+        shortest_path_bucket = distance.clamp(max=float(self.shortest_path_unknown_idx)).long()
+        valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
+        shortest_path_bucket = torch.where(
+            valid_pairs,
+            shortest_path_bucket,
+            torch.full_like(shortest_path_bucket, self.shortest_path_unknown_idx),
+        )
+        return shortest_path_bucket
+
+    def forward(self, node_coords, hop_ids, valid_mask, adjacency_mask, cell_inf=None):
+        batch_size, num_nodes, _ = node_coords.shape
+        device = node_coords.device
+        dtype = node_coords.dtype
+        valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
+        pair_mask = adjacency_mask & valid_pairs
+        eye = torch.eye(num_nodes, device=device, dtype=torch.bool).unsqueeze(0)
+
+        rel_coords = node_coords[:, None, :, :] - node_coords[:, :, None, :]
+        dx = rel_coords[..., 0]
+        dy = rel_coords[..., 1]
+        distance = torch.sqrt(dx.pow(2) + dy.pow(2) + 1e-8)
+        distance = torch.where(eye, torch.zeros_like(distance), distance)
+
+        local_scale = self._build_local_scale(node_coords, valid_mask)
+        scaled = local_scale[:, None, None]
+        normalized_dx = dx / scaled
+        normalized_dy = dy / scaled
+        normalized_distance = distance / scaled
+        log_distance = torch.log1p(normalized_distance)
+
+        continuous_features = torch.stack(
+            [
+                normalized_dx,
+                normalized_dy,
+                normalized_distance,
+                log_distance,
+                normalized_dx.abs(),
+                normalized_dy.abs(),
+            ],
+            dim=-1,
+        )
+        continuous_features = continuous_features * pair_mask.unsqueeze(-1).to(dtype)
+
+        distance_bucket = torch.bucketize(normalized_distance, self.distance_bin_edges).long() + 1
+        distance_bucket = torch.where(eye, torch.zeros_like(distance_bucket), distance_bucket)
+        distance_bucket = torch.where(
+            valid_pairs,
+            distance_bucket,
+            torch.full_like(distance_bucket, self.distance_unknown_idx),
+        )
+
+        angle = torch.remainder(torch.atan2(dy, dx) + (2 * math.pi), 2 * math.pi)
+        direction_bucket = torch.floor(
+            angle / ((2 * math.pi) / float(self.num_direction_bins))
+        ).long() + 1
+        direction_bucket = direction_bucket.clamp(max=self.num_direction_bins)
+        direction_bucket = torch.where(eye, torch.zeros_like(direction_bucket), direction_bucket)
+        direction_bucket = torch.where(
+            valid_pairs,
+            direction_bucket,
+            torch.full_like(direction_bucket, self.direction_unknown_idx),
+        )
+
+        role_ids = hop_ids.clamp(min=0, max=self.num_roles - 1)
+        role_i = role_ids[:, :, None]
+        role_j = role_ids[:, None, :]
+        role_pair_id = (role_i * self.num_roles) + role_j
+        role_pair_id = torch.where(
+            valid_pairs,
+            role_pair_id,
+            torch.full_like(role_pair_id, self.role_pair_unknown_idx),
+        )
+
+        hop_delta = (role_j - role_i).abs()
+        hop_delta = torch.where(
+            valid_pairs,
+            hop_delta,
+            torch.full_like(hop_delta, self.hop_delta_unknown_idx),
+        )
+
+        query_is_center = role_i == 0
+        key_is_center = role_j == 0
+        center_edge = pair_mask & ~eye & (query_is_center | key_is_center)
+        same_hop_edge = pair_mask & ~eye & ~center_edge & (role_i == role_j)
+        cross_hop_edge = pair_mask & ~eye & ~center_edge & (role_i != role_j)
+
+        edge_type = torch.full((batch_size, num_nodes, num_nodes), 4, device=device, dtype=torch.long)
+        edge_type = torch.where(eye & valid_pairs, torch.zeros_like(edge_type), edge_type)
+        edge_type = torch.where(center_edge, torch.ones_like(edge_type), edge_type)
+        edge_type = torch.where(same_hop_edge, torch.full_like(edge_type, 2), edge_type)
+        edge_type = torch.where(cross_hop_edge, torch.full_like(edge_type, 3), edge_type)
+
+        shortest_path_bucket = self._build_shortest_path_bucket(adjacency_mask, valid_mask)
+
+        degree = adjacency_mask.long().sum(dim=-1) - valid_mask.long()
+        degree = degree.clamp(min=0, max=self.max_degree)
+        degree_ids = torch.where(
+            valid_mask,
+            degree + 1,
+            torch.zeros_like(degree),
+        )
+
+        cell_type_ids, cell_type_valid = self._derive_cell_type_ids(cell_inf, valid_mask)
+        known_cell_pairs = cell_type_valid[:, :, None] & cell_type_valid[:, None, :]
+        same_cell_type = torch.zeros((batch_size, num_nodes, num_nodes), device=device, dtype=torch.long)
+        same_cell_type = torch.where(
+            known_cell_pairs & (cell_type_ids[:, :, None] == cell_type_ids[:, None, :]),
+            torch.ones_like(same_cell_type),
+            same_cell_type,
+        )
+        same_cell_type = torch.where(
+            known_cell_pairs & (cell_type_ids[:, :, None] != cell_type_ids[:, None, :]),
+            torch.full_like(same_cell_type, 2),
+            same_cell_type,
+        )
+
+        return {
+            'pair_mask': pair_mask,
+            'dx': dx,
+            'dy': dy,
+            'distance': distance,
+            'normalized_distance': normalized_distance,
+            'continuous_features': continuous_features,
+            'distance_bucket': distance_bucket,
+            'direction_bucket': direction_bucket,
+            'role_ids': role_ids,
+            'role_pair_id': role_pair_id,
+            'hop_delta': hop_delta,
+            'edge_type': edge_type,
+            'shortest_path_bucket': shortest_path_bucket,
+            'degree_ids': degree_ids,
+            'cell_type_ids': cell_type_ids,
+            'same_cell_type': same_cell_type,
+        }
+
+
+class PairwiseStructuralBias(nn.Module):
+    def __init__(
+        self,
+        heads,
+        hidden_dim,
+        continuous_dim,
+        num_distance_buckets,
+        num_direction_buckets,
+        num_role_pair_buckets,
+        num_hop_delta_buckets,
+        num_edge_types,
+        num_shortest_path_buckets,
+        max_degree,
+        max_cell_types,
+        num_same_cell_type_buckets=3,
+    ):
+        super().__init__()
+        self.continuous_mlp = nn.Sequential(
+            nn.Linear(continuous_dim, hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        self.distance_embedding = nn.Embedding(num_distance_buckets, hidden_dim)
+        self.direction_embedding = nn.Embedding(num_direction_buckets, hidden_dim)
+        self.role_pair_embedding = nn.Embedding(num_role_pair_buckets, hidden_dim)
+        self.hop_delta_embedding = nn.Embedding(num_hop_delta_buckets, hidden_dim)
+        self.edge_type_embedding = nn.Embedding(num_edge_types, hidden_dim)
+        self.shortest_path_embedding = nn.Embedding(num_shortest_path_buckets, hidden_dim)
+        self.degree_embedding = nn.Embedding(max_degree + 2, hidden_dim, padding_idx=0)
+        self.cell_type_embedding = nn.Embedding(max_cell_types + 1, hidden_dim, padding_idx=0)
+        self.same_cell_type_embedding = nn.Embedding(num_same_cell_type_buckets, hidden_dim)
+        self.output = nn.Sequential(
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, heads),
+        )
+
+    def forward(self, relation_features):
+        pair_repr = self.continuous_mlp(relation_features['continuous_features'])
+        pair_repr = pair_repr + self.distance_embedding(relation_features['distance_bucket'])
+        pair_repr = pair_repr + self.direction_embedding(relation_features['direction_bucket'])
+        pair_repr = pair_repr + self.role_pair_embedding(relation_features['role_pair_id'])
+        pair_repr = pair_repr + self.hop_delta_embedding(relation_features['hop_delta'])
+        pair_repr = pair_repr + self.edge_type_embedding(relation_features['edge_type'])
+        pair_repr = pair_repr + self.shortest_path_embedding(relation_features['shortest_path_bucket'])
+        pair_repr = pair_repr + self.same_cell_type_embedding(relation_features['same_cell_type'])
+
+        degree_embed = self.degree_embedding(relation_features['degree_ids'])
+        pair_repr = pair_repr + degree_embed[:, :, None, :] + degree_embed[:, None, :, :]
+
+        cell_type_embed = self.cell_type_embedding(relation_features['cell_type_ids'])
+        pair_repr = pair_repr + cell_type_embed[:, :, None, :] + cell_type_embed[:, None, :, :]
+
+        bias = self.output(pair_repr)
+        bias = bias * relation_features['pair_mask'].unsqueeze(-1).to(bias.dtype)
+        return rearrange(bias, 'b i j h -> b h i j')
+
+
+class RelationAwareGraphSelfAttention(nn.Module):
+    def __init__(
+        self,
+        query_dim=512,
+        heads=4,
+        dim_head=64,
+        dropout=0.,
+        relation_hidden_dim=64,
+        structure_builder=None,
+    ):
+        super().__init__()
+        if structure_builder is None:
+            raise ValueError('structure_builder must be provided for relation-aware attention.')
+
         inner_dim = dim_head * heads
         self.scale = dim_head ** -0.5
         self.heads = heads
@@ -176,62 +455,88 @@ class EdgeAwareGraphSelfAttention(nn.Module):
         self.to_q = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_k = nn.Linear(query_dim, inner_dim, bias=False)
         self.to_v = nn.Linear(query_dim, inner_dim, bias=False)
-        self.edge_bias = nn.Sequential(
-            nn.Linear(edge_dim, inner_dim),
-            nn.GELU(),
-            nn.Linear(inner_dim, heads),
-        )
-        self.edge_value = nn.Sequential(
-            nn.Linear(edge_dim, inner_dim),
-            nn.GELU(),
-            nn.Linear(inner_dim, inner_dim),
-        )
         self.to_out = nn.Linear(inner_dim, query_dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, adjacency_mask, edge_attr):
+        self.structural_bias = PairwiseStructuralBias(
+            heads=heads,
+            hidden_dim=relation_hidden_dim,
+            continuous_dim=structure_builder.continuous_dim,
+            num_distance_buckets=structure_builder.num_distance_buckets,
+            num_direction_buckets=structure_builder.num_direction_buckets,
+            num_role_pair_buckets=structure_builder.num_role_pair_buckets,
+            num_hop_delta_buckets=structure_builder.num_hop_delta_buckets,
+            num_edge_types=structure_builder.num_edge_types,
+            num_shortest_path_buckets=structure_builder.num_shortest_path_buckets,
+            max_degree=structure_builder.max_degree,
+            max_cell_types=structure_builder.max_cell_types,
+            num_same_cell_type_buckets=structure_builder.num_same_cell_type_buckets,
+        )
+
+    def _apply_mask(self, logits, pair_mask, valid_mask):
+        batch_size, _, num_nodes, _ = logits.shape
+        eye = torch.eye(num_nodes, device=logits.device, dtype=torch.bool).unsqueeze(0)
+        invalid_query_fallback = (~valid_mask)[:, :, None] & eye
+        safe_pair_mask = pair_mask | invalid_query_fallback
+
+        logits = logits.masked_fill(~safe_pair_mask[:, None, :, :], -torch.finfo(logits.dtype).max)
+        attention = logits.softmax(dim=-1)
+        attention = attention * pair_mask[:, None, :, :].to(attention.dtype)
+        attention = attention / attention.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+        return self.dropout(attention)
+
+    def forward(self, x, pair_mask, valid_mask, relation_features):
         h = self.heads
 
         q = rearrange(self.to_q(x), 'b n (h d) -> b h n d', h=h)
         k = rearrange(self.to_k(x), 'b n (h d) -> b h n d', h=h)
         v = rearrange(self.to_v(x), 'b n (h d) -> b h n d', h=h)
 
-        edge_bias = rearrange(self.edge_bias(edge_attr), 'b i j h -> b h i j')
-        edge_value = rearrange(self.edge_value(edge_attr), 'b i j (h d) -> b h i j d', h=h)
+        structural_bias = self.structural_bias(relation_features)
+        logits = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
+        logits = logits + structural_bias
+        attention = self._apply_mask(logits, pair_mask, valid_mask)
 
-        sim = einsum('b h i d, b h j d -> b h i j', q, k) * self.scale
-        sim = sim + edge_bias
-        sim = sim.masked_fill(~adjacency_mask[:, None, :, :], -torch.finfo(sim.dtype).max)
-
-        attn = sim.softmax(dim=-1)
-        attn = self.dropout(attn)
-
-        messages = v[:, :, None, :, :] + edge_value
-        out = einsum('b h i j, b h i j d -> b h i d', attn, messages)
+        out = einsum('b h i j, b h j d -> b h i d', attention, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
-        return self.to_out(out), attn
+        return self.to_out(out), attention, structural_bias
 
 
 class LocalGraphTransformerLayer(nn.Module):
-    def __init__(self, dim=256, edge_dim=11, heads=4, dim_head=64, dropout=0., ff_mult=2):
+    def __init__(
+        self,
+        dim=256,
+        heads=4,
+        dim_head=64,
+        dropout=0.,
+        ff_mult=2,
+        relation_hidden_dim=64,
+        structure_builder=None,
+    ):
         super().__init__()
-        self.attn = EdgeAwareGraphSelfAttention(
+        self.attn = RelationAwareGraphSelfAttention(
             query_dim=dim,
-            edge_dim=edge_dim,
             heads=heads,
             dim_head=dim_head,
             dropout=dropout,
+            relation_hidden_dim=relation_hidden_dim,
+            structure_builder=structure_builder,
         )
         self.ffn = FeedForward(dim=dim, mult=ff_mult, dropout=dropout)
         self.norm1 = nn.LayerNorm(dim)
         self.norm2 = nn.LayerNorm(dim)
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, x, adjacency_mask, edge_attr):
-        attn_out, attn_weights = self.attn(self.norm1(x), adjacency_mask, edge_attr)
+    def forward(self, x, pair_mask, valid_mask, relation_features):
+        attn_out, attn_weights, structural_bias = self.attn(
+            self.norm1(x),
+            pair_mask,
+            valid_mask,
+            relation_features,
+        )
         x = x + self.dropout(attn_out)
         x = x + self.dropout(self.ffn(self.norm2(x)))
-        return x, attn_weights
+        return x, attn_weights, structural_bias
 
 
 class LocalGraphTransformerEncoder(nn.Module):
@@ -244,28 +549,42 @@ class LocalGraphTransformerEncoder(nn.Module):
         dropout=0.,
         ff_mult=2,
         neighbor_knn=3,
+        relation_hidden_dim=64,
+        num_direction_bins=8,
+        distance_bin_edges=(0.5, 0.9, 1.25, 1.75, 2.5, 3.5),
+        max_shortest_path_distance=4,
+        max_degree=16,
+        max_cell_types=64,
     ):
         super().__init__()
-        self.edge_dim = 11
         self.neighbor_knn = neighbor_knn
+        self.structure_builder = PairwiseStructureBuilder(
+            num_roles=3,
+            num_direction_bins=num_direction_bins,
+            distance_bin_edges=distance_bin_edges,
+            max_shortest_path_distance=max_shortest_path_distance,
+            max_degree=max_degree,
+            max_cell_types=max_cell_types,
+        )
         self.layers = nn.ModuleList(
             [
                 LocalGraphTransformerLayer(
                     dim=dim,
-                    edge_dim=self.edge_dim,
                     heads=heads,
                     dim_head=dim_head,
                     dropout=dropout,
                     ff_mult=ff_mult,
+                    relation_hidden_dim=relation_hidden_dim,
+                    structure_builder=self.structure_builder,
                 )
                 for _ in range(depth)
             ]
         )
 
     def _build_neighbor_pair_mask(self, node_coords, valid_mask):
-        num_neighbors = node_coords.size(1)
+        batch_size, num_neighbors, _ = node_coords.shape
         neighbor_pair_mask = torch.zeros(
-            (node_coords.size(0), num_neighbors, num_neighbors),
+            (batch_size, num_neighbors, num_neighbors),
             device=node_coords.device,
             dtype=torch.bool,
         )
@@ -302,8 +621,9 @@ class LocalGraphTransformerEncoder(nn.Module):
 
     def build_adjacency_mask(self, valid_mask, node_coords=None, hop_ids=None):
         batch_size, num_nodes = valid_mask.shape
+        valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
         eye = torch.eye(num_nodes, device=valid_mask.device, dtype=torch.bool).unsqueeze(0).repeat(batch_size, 1, 1)
-        adjacency_mask = eye.clone()
+        adjacency_mask = eye & valid_pairs
 
         if num_nodes > 1:
             neighbor_valid = valid_mask[:, 1:]
@@ -318,73 +638,7 @@ class LocalGraphTransformerEncoder(nn.Module):
 
             adjacency_mask[:, 1:, 1:] = adjacency_mask[:, 1:, 1:] | neighbor_pair_mask
 
-        valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
-        adjacency_mask = adjacency_mask & (valid_pairs | eye)
-        return adjacency_mask
-
-    def _derive_cell_type_ids(self, cell_inf, valid_mask):
-        if cell_inf is None:
-            return None, None
-
-        cell_type_ids = cell_inf.argmax(dim=-1)
-        cell_type_valid = cell_inf.abs().sum(dim=-1) > 0
-        cell_type_valid = cell_type_valid & valid_mask
-        return cell_type_ids, cell_type_valid
-
-    def _build_edge_attr(self, node_coords, hop_ids, valid_mask, adjacency_mask, cell_inf=None):
-        batch_size, num_nodes, _ = node_coords.shape
-        dtype = node_coords.dtype
-
-        rel_coords = node_coords[:, None, :, :] - node_coords[:, :, None, :]
-        dx = rel_coords[..., 0]
-        dy = rel_coords[..., 1]
-        distance = torch.sqrt(dx.pow(2) + dy.pow(2) + 1e-8)
-
-        center_distance = torch.sqrt(node_coords[:, :, 0].pow(2) + node_coords[:, :, 1].pow(2) + 1e-8)
-        neighbor_valid_mask = valid_mask.clone()
-        neighbor_valid_mask[:, 0] = False
-        center_distance = center_distance.masked_fill(~neighbor_valid_mask, 0.0)
-        neighbor_count = neighbor_valid_mask.sum(dim=-1).clamp(min=1).to(dtype)
-        local_scale = center_distance.sum(dim=-1) / neighbor_count
-        local_scale = torch.where(local_scale > 0, local_scale, torch.ones_like(local_scale))
-        normalized_distance = distance / local_scale[:, None, None].clamp(min=1e-6)
-
-        node_index = torch.arange(num_nodes, device=node_coords.device)
-        query_is_center = (node_index[None, :, None] == 0).expand(batch_size, num_nodes, num_nodes)
-        key_is_center = (node_index[None, None, :] == 0).expand(batch_size, num_nodes, num_nodes)
-        is_self = torch.eye(num_nodes, device=node_coords.device, dtype=torch.bool).unsqueeze(0).expand(batch_size, -1, -1)
-        is_neighbor_neighbor = ~(query_is_center | key_is_center | is_self)
-
-        hop_i = hop_ids[:, :, None]
-        hop_j = hop_ids[:, None, :]
-        same_hop = hop_i == hop_j
-        hop_delta = (hop_j - hop_i).abs().to(dtype)
-
-        cell_type_ids, cell_type_valid = self._derive_cell_type_ids(cell_inf, valid_mask)
-        if cell_type_ids is None:
-            same_cell_type = torch.zeros((batch_size, num_nodes, num_nodes), device=node_coords.device, dtype=dtype)
-        else:
-            same_cell_type = ((cell_type_ids[:, :, None] == cell_type_ids[:, None, :]) & cell_type_valid[:, :, None] & cell_type_valid[:, None, :]).to(dtype)
-
-        edge_attr = torch.stack(
-            [
-                dx,
-                dy,
-                distance,
-                normalized_distance,
-                query_is_center.to(dtype),
-                key_is_center.to(dtype),
-                is_self.to(dtype),
-                is_neighbor_neighbor.to(dtype),
-                same_hop.to(dtype),
-                hop_delta,
-                same_cell_type,
-            ],
-            dim=-1,
-        )
-
-        edge_attr = edge_attr * adjacency_mask.unsqueeze(-1).to(dtype)
-        return edge_attr
+        return adjacency_mask & valid_pairs
 
     def build_graph_context(self, node_inputs, graph_meta=None, cell_inf=None):
         batch_size, num_nodes, _ = node_inputs.shape
@@ -409,14 +663,21 @@ class LocalGraphTransformerEncoder(nn.Module):
             node_coords = build_fallback_coords(hop_ids, valid_mask, dtype)
 
         adjacency_mask = self.build_adjacency_mask(valid_mask, node_coords=node_coords, hop_ids=hop_ids)
-        edge_attr = self._build_edge_attr(node_coords, hop_ids, valid_mask, adjacency_mask, cell_inf=cell_inf)
+        relation_features = self.structure_builder(
+            node_coords,
+            hop_ids,
+            valid_mask,
+            adjacency_mask,
+            cell_inf=cell_inf,
+        )
 
         return {
             'valid_mask': valid_mask,
             'hop_ids': hop_ids,
             'coords': node_coords,
             'adjacency_mask': adjacency_mask,
-            'edge_attr': edge_attr,
+            'edge_attr': relation_features['continuous_features'],
+            'relation_features': relation_features,
         }
 
     def forward(self, x, valid_mask=None, graph_context=None, return_attention=False):
@@ -427,25 +688,35 @@ class LocalGraphTransformerEncoder(nn.Module):
 
         valid_mask = graph_context['valid_mask']
         adjacency_mask = graph_context['adjacency_mask']
-        edge_attr = graph_context['edge_attr']
+        relation_features = graph_context['relation_features']
         node_mask = valid_mask.unsqueeze(-1).to(x.dtype)
 
         attention_maps = []
+        structural_biases = []
         for layer in self.layers:
             x = x * node_mask
-            x, attn_weights = layer(x, adjacency_mask, edge_attr)
+            x, attn_weights, structural_bias = layer(x, adjacency_mask, valid_mask, relation_features)
             x = x * node_mask
             if return_attention:
                 attention_maps.append(attn_weights)
+                structural_biases.append(structural_bias)
 
         if return_attention:
             graph_state = {
                 'attention_weights': attention_maps,
+                'structural_bias': structural_biases,
+                'center_attention_weights': [layer_attn[:, :, 0, :] for layer_attn in attention_maps],
+                'center_structural_bias': [layer_bias[:, :, 0, :] for layer_bias in structural_biases],
                 'adjacency_mask': adjacency_mask,
-                'edge_attr': edge_attr,
+                'edge_attr': relation_features['continuous_features'],
                 'hop_ids': graph_context['hop_ids'],
                 'coords': graph_context['coords'],
                 'valid_mask': valid_mask,
+                'relation_features': relation_features,
+                'role_names': self.structure_builder.ROLE_NAMES,
+                'edge_type_names': self.structure_builder.EDGE_TYPE_NAMES,
+                'distance_bin_edges': self.structure_builder.distance_bin_edges.detach().cpu().tolist(),
+                'num_direction_bins': self.structure_builder.num_direction_bins,
             }
             return x * node_mask, graph_state
 
