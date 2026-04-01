@@ -19,6 +19,8 @@ NOTEBOOKS=(
     "Tutorial_6.1__Train_NicheTrans_STAR__on_STARmap_PLUS_data.ipynb"
     "Tutorial_7.1__Train_NicheTrans_on_10x_Xenium_data.ipynb"
     "Tutorial_8.1__Train_NicheTrans_on_human_lymph_node_data.ipynb"
+    "Tutorial_9.1__Train_&_test_NicheTrans_on_MISAR-seq(atac2rna).ipynb"
+    "Tutorial_9.2__Train_&_test_NicheTrans_on_MISAR-seq(rna2atac).ipynb"
 )
 
 log() {
