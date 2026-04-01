@@ -3,6 +3,7 @@ import numpy as np
 
 from PIL import Image
 from torch.utils.data import Dataset
+from torch_geometric.loader import DataLoader as PyGDataLoader
 
 def read_image(img_path):
     got_img = False
@@ -14,6 +15,21 @@ def read_image(img_path):
             print("IOError incurred when reading '{}'. Will redo. Don't worry. Just chill.".format(img_path))
             pass
     return img
+
+
+class GraphSliceDataset(Dataset):
+    def __init__(self, graphs):
+        self.graphs = graphs
+
+    def __len__(self):
+        return len(self.graphs)
+
+    def __getitem__(self, index):
+        return self.graphs[index]
+
+
+def create_graph_loader(graphs, batch_size=1, shuffle=False):
+    return PyGDataLoader(GraphSliceDataset(graphs), batch_size=batch_size, shuffle=shuffle)
 
 
 class SMA_loader(Dataset):

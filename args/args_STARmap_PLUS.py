@@ -5,6 +5,12 @@ def generate_args():
     parser.add_argument('--noise_rate', default=0.5, type=float)  # 0.5
     parser.add_argument('--dropout_rate', default=0.25, type=float)
     parser.add_argument('--n_top_genes', default=2000, type=int)
+    parser.add_argument('--graph_hidden_dim', default=256, type=int)
+    parser.add_argument('--graph_num_layers', default=3, type=int)
+    parser.add_argument('--graph_heads', default=4, type=int)
+    parser.add_argument('--graph_k', default=6, type=int)
+    parser.add_argument('--val_ratio', default=0.1, type=float)
+    parser.add_argument('--use_cell_type', default=True, type=bool)
 
     # Datasets
     parser.add_argument('-j', '--workers', default=4, type=int,
@@ -19,8 +25,8 @@ def generate_args():
     parser.add_argument('--stepsize', default=20, type=int,
                         help="stepsize to decay learning rate (>0 means this is enabled)")
 
-    parser.add_argument('--train-batch', default=128, type=int)
-    parser.add_argument('--test-batch', default=32, type=int)
+    parser.add_argument('--train-batch', default=1, type=int)
+    parser.add_argument('--test-batch', default=1, type=int)
 
     # Optimization options
     parser.add_argument('--optimizer', default='adam', type=str,
