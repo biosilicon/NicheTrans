@@ -6,6 +6,8 @@ import scanpy as sc
 
 from collections import defaultdict
 
+from datasets.local_graph_utils import build_local_graph_metadata
+
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True, mouse=False):
     assert(model in ['Radius', 'KNN'])
     if verbose:
@@ -122,9 +124,12 @@ class Breast_cancer(object):
 
         ######
         dict_rna, dict_ct = {}, {}
+        dict_coord = {}
+        coordinates = rna_adata.obs[['x', 'y']].values.astype(np.float32)
         for i, index in enumerate(indexes):
             dict_rna[index] = rna_array[i]
             dict_ct[index] = (ct_array[i] == self.cell_mask) * 1
+            dict_coord[index] = coordinates[i]
         #######
         
         for i in range(rna_adata.shape[0]):
@@ -132,6 +137,7 @@ class Breast_cancer(object):
 
             index = indexes[i]
             rna, protein, ct = rna_array[i], proteins[i], dict_ct[index]
+            center_coord = dict_coord[index]
 
             for j in graph[index]:
                 rna_neighbor.append(dict_rna[j])
@@ -139,8 +145,12 @@ class Breast_cancer(object):
 
             rna_neighbor = np.array(rna_neighbor)
             ct_neighbor = np.array(ct_neighbor)
+            neighbor_coords = np.array([dict_coord[j] for j in graph[index]], dtype=np.float32)
+            hop_ids = np.ones((len(graph[index]),), dtype=np.int64)
+            valid_neighbor_mask = np.ones((len(graph[index]),), dtype=bool)
+            graph_meta = build_local_graph_metadata(center_coord, neighbor_coords, hop_ids, valid_neighbor_mask)
 
-            dataset.append((rna, protein, ct, rna_neighbor, ct_neighbor, index))
+            dataset.append((rna, protein, ct, rna_neighbor, ct_neighbor, index, graph_meta))
 
         return dataset
 

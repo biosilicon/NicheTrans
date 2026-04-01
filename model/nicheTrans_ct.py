@@ -67,7 +67,7 @@ class NicheTrans_ct(nn.Module):
         )
         self.local_graph_encoder = LocalGraphTransformerEncoder(
             dim=self.fea_size,
-            depth=1,
+            depth=2,
             heads=4,
             dim_head=64,
             dropout=self.dropout_rate,
@@ -98,18 +98,24 @@ class NicheTrans_ct(nn.Module):
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
 
-    def forward(self, source, source_neighbor, cell_inf):
+    def forward(self, source, source_neighbor, cell_inf, graph_meta=None, return_attention=False):
         b = source.size(0)
         l = source_neighbor.size(1)
 
         node_inputs = torch.cat([source[:, None, :], source_neighbor], dim=1)
-        valid_mask = infer_valid_node_mask(node_inputs)
+        graph_context = self.local_graph_encoder.build_graph_context(
+            node_inputs,
+            graph_meta=graph_meta,
+            cell_inf=cell_inf,
+        )
+        valid_mask = graph_context['valid_mask']
         role_tokens = build_local_role_tokens(
             self.token_center,
             self.token_neigh_1,
             self.token_neigh_2,
             l,
             valid_mask=valid_mask,
+            hop_ids=graph_context['hop_ids'],
         )
         class_tokens = (self.cell_tokens * cell_inf.unsqueeze(dim=-1)).sum(-2)
         class_tokens = class_tokens * valid_mask.unsqueeze(-1).to(class_tokens.dtype)
@@ -117,7 +123,14 @@ class NicheTrans_ct(nn.Module):
         f_omic = self.encoder_rna(node_inputs.reshape(-1, self.source_length)).reshape(b, -1, self.fea_size)
         f_omic = f_omic + role_tokens + class_tokens
         f_omic = self.projection_rna(f_omic)
-        f_omic = self.local_graph_encoder(f_omic, valid_mask)
+        if return_attention:
+            f_omic, graph_state = self.local_graph_encoder(
+                f_omic,
+                graph_context=graph_context,
+                return_attention=True,
+            )
+        else:
+            f_omic = self.local_graph_encoder(f_omic, graph_context=graph_context)
 
         f = self.dropout(f_omic[:, 0, :])
 
@@ -125,5 +138,8 @@ class NicheTrans_ct(nn.Module):
         for i in range(self.target_length):
             out.append(self.predict_layers[i](f))
         out = torch.cat(out, dim=1)
+
+        if return_attention:
+            return out, graph_state
 
         return out

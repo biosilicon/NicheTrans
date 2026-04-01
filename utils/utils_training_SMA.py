@@ -2,6 +2,7 @@ import random
 import torch
 
 from utils.evaluation import evaluator
+from utils.graph_meta import get_batch_graph_meta
 from utils.utils import AverageMeter
 
 
@@ -12,21 +13,24 @@ def train(model, criterion, optimizer, trainloader, use_img=True, device=None):
     model.train()     #nn.Module内置方法 将模型切换到训练模式
     losses = AverageMeter()
 
-    for batch_idx, (imgs, source, target, source_neightbors, _, _) in enumerate(trainloader):
+    for batch_idx, (imgs, source, target, source_neightbors, _, samples) in enumerate(trainloader):
 
         source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
+        neighbor_mask = None
         ############
         if random.random() > 0.7:
             mask = torch.ones((source_neightbors.size(0), 8, 1))
             mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             source_neightbors = source_neightbors * mask
+            neighbor_mask = mask
         ############
+        graph_meta = get_batch_graph_meta(trainloader.dataset, samples, device=device, neighbor_keep_mask=neighbor_mask)
 
         if use_img == True:
             imgs = imgs.to(device)
-            outputs = model(imgs, source, source_neightbors)
+            outputs = model(imgs, source, source_neightbors, graph_meta=graph_meta)
         else:
-            outputs = model(source, source_neightbors)
+            outputs = model(source, source_neightbors, graph_meta=graph_meta)
 
         loss = criterion(outputs, target)
 
@@ -52,12 +56,13 @@ def test(model, testloader, use_img=True, device=None):
         for _, (imgs, source, target, source_neightbors, _, samples) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
+            graph_meta = get_batch_graph_meta(testloader.dataset, samples, device=device)
 
             if use_img == True:
                 imgs = imgs.to(device)
-                outputs = model(imgs, source, source_neightbors)
+                outputs = model(imgs, source, source_neightbors, graph_meta=graph_meta)
             else:
-                outputs = model(source, source_neightbors)
+                outputs = model(source, source_neightbors, graph_meta=graph_meta)
 
             predict_list.append(outputs)
             target_list.append(target)

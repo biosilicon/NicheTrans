@@ -4,6 +4,7 @@ import random
 import torch
 
 from utils.evaluation import evaluator
+from utils.graph_meta import get_batch_graph_meta
 
 from utils.utils import AverageMeter
 from sklearn.metrics import roc_auc_score, confusion_matrix
@@ -14,10 +15,11 @@ def train(model, criterion, optimizer, trainloader, ct_information=False, device
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model.train()
     losses = AverageMeter()
-    for batch_idx, (rna, protein, cell, rna_neighbors, cell_neighbor, _) in enumerate(trainloader):
+    for batch_idx, (rna, protein, cell, rna_neighbors, cell_neighbor, samples) in enumerate(trainloader):
 
         rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
         cell, cell_neighbor = cell.to(device), cell_neighbor.to(device)
+        neighbor_mask = None
 
         ############
         if random.random() > 0.7:
@@ -25,15 +27,17 @@ def train(model, criterion, optimizer, trainloader, ct_information=False, device
             mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             rna_neighbors = rna_neighbors * mask
             cell_neighbor = cell_neighbor * mask
+            neighbor_mask = mask
         ############
 
         cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1)
         source, target, source_neightbors = rna, protein, rna_neighbors
+        graph_meta = get_batch_graph_meta(trainloader.dataset, samples, device=device, neighbor_keep_mask=neighbor_mask)
 
         if ct_information == True:
-            outputs = model(source, source_neightbors, cell_inf)
+            outputs = model(source, source_neightbors, cell_inf, graph_meta=graph_meta)
         else:
-            outputs = model(source, source_neightbors)
+            outputs = model(source, source_neightbors, graph_meta=graph_meta)
         outputs = torch.sigmoid(outputs)
 
         loss = criterion(outputs, target)
@@ -55,15 +59,16 @@ def test(model, testloader, ct_information=False, device=None):
     predict_list, target_list = [], []
 
     with torch.no_grad():
-        for _, (source, target, cell, source_neightbors, cell_neighbor, _) in enumerate(testloader):
+        for _, (source, target, cell, source_neightbors, cell_neighbor, samples) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
             cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1).to(device)
+            graph_meta = get_batch_graph_meta(testloader.dataset, samples, device=device)
 
             if ct_information == True:
-                outputs = model(source, source_neightbors, cell_inf)
+                outputs = model(source, source_neightbors, cell_inf, graph_meta=graph_meta)
             else:
-                outputs = model(source, source_neightbors)
+                outputs = model(source, source_neightbors, graph_meta=graph_meta)
             outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)

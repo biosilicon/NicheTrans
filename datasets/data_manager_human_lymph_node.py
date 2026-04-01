@@ -10,6 +10,8 @@ from sklearn.cluster import KMeans
 from collections import defaultdict
 from scipy.sparse import issparse
 
+from datasets.local_graph_utils import build_local_graph_metadata
+
 
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True):
@@ -180,8 +182,10 @@ class Lymph_node(object):
 
             for key in rna_keys:
                 rna_temp, protein_temp = rna_dic[key], protein_dic[key]
+                center_coord = np.array([float(item) for item in key.split('_')], dtype=np.float32)
 
                 rna_neighbors = []
+                neighbor_coords, hop_ids, valid_neighbor_mask = [], [], []
                 neighbors_1, neighbors_2 = graph_1[key], graph_2[key]
                 neighbors_2 = [item for item in neighbors_2 if item not in neighbors_1]
 
@@ -189,27 +193,44 @@ class Lymph_node(object):
                 for j in neighbors_1:
                     if j not in rna_keys:
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor_coords.append(center_coord.copy())
+                        valid_neighbor_mask.append(False)
                     else:
                         rna_neighbors.append(rna_dic[j])
+                        neighbor_coords.append(np.array([float(item) for item in j.split('_')], dtype=np.float32))
+                        valid_neighbor_mask.append(True)
+                    hop_ids.append(1)
 
                 if len(neighbors_1) != 4:
                     for _ in range(4-len(neighbors_1)):
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor_coords.append(center_coord.copy())
+                        hop_ids.append(1)
+                        valid_neighbor_mask.append(False)
 
                 # connect to the second round
                 for j in neighbors_2:
                     if j not in rna_keys:
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor_coords.append(center_coord.copy())
+                        valid_neighbor_mask.append(False)
                     else:
                         rna_neighbors.append(rna_dic[j])
+                        neighbor_coords.append(np.array([float(item) for item in j.split('_')], dtype=np.float32))
+                        valid_neighbor_mask.append(True)
+                    hop_ids.append(2)
 
                 if len(neighbors_2) != 4:
                     for _ in range(4-len(neighbors_2)):
                         rna_neighbors.append(np.zeros_like(rna_temp))
+                        neighbor_coords.append(center_coord.copy())
+                        hop_ids.append(2)
+                        valid_neighbor_mask.append(False)
 
                 rna_neighbors = np.stack(rna_neighbors)
+                graph_meta = build_local_graph_metadata(center_coord, neighbor_coords, hop_ids, valid_neighbor_mask)
                 
-                dataset.append((rna_temp, protein_temp, rna_neighbors, key))
+                dataset.append((rna_temp, protein_temp, rna_neighbors, key, graph_meta))
 
         return dataset
 

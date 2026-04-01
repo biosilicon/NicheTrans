@@ -7,6 +7,8 @@ import scanpy as sc
 import sklearn.neighbors
 from collections import defaultdict
 
+from datasets.local_graph_utils import build_local_graph_metadata
+
 
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True, mouse=False):
@@ -146,12 +148,18 @@ class AD_Mouse(object):
             for i, index in enumerate(indexes):
                 dict_cell[index] = (cell_array[i] == self.cell_mask) * 1
 
+            dict_coord = {}
+            coordinates = rna_adata.obs[['x', 'y']].values.astype(np.float32)
+            for i, index in enumerate(indexes):
+                dict_coord[index] = coordinates[i]
+
             for i in range(rna_adata.shape[0]):
                 rna_neighbor, cell_neighbor = [], []
 
                 cell = (cell_array[i] == self.cell_mask) * 1
                 rna, protein = rna_array[i], proteins[i]
                 index = indexes[i]
+                center_coord = dict_coord[index]
 
                 for j in graph[index]:
                     rna_neighbor.append(dict_rna[j])
@@ -159,8 +167,12 @@ class AD_Mouse(object):
 
                 rna_neighbor = np.array(rna_neighbor)
                 cell_neighbor = np.array(cell_neighbor)
+                neighbor_coords = np.array([dict_coord[j] for j in graph[index]], dtype=np.float32)
+                hop_ids = np.ones((len(graph[index]),), dtype=np.int64)
+                valid_neighbor_mask = np.ones((len(graph[index]),), dtype=bool)
+                graph_meta = build_local_graph_metadata(center_coord, neighbor_coords, hop_ids, valid_neighbor_mask)
 
-                dataset.append((rna, protein, cell, rna_neighbor, cell_neighbor, slide + '/' + index))
+                dataset.append((rna, protein, cell, rna_neighbor, cell_neighbor, slide + '/' + index, graph_meta))
 
         return dataset, tau, Aβ, graph
 

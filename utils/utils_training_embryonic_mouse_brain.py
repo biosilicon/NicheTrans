@@ -4,6 +4,7 @@ import random
 import torch
 
 from utils.evaluation import evaluator
+from utils.graph_meta import get_batch_graph_meta
 from utils.utils import AverageMeter
 from sklearn.metrics import roc_auc_score
 
@@ -14,18 +15,21 @@ def train_regression(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (source, target, source_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (source, target, source_neighbors, samples) in enumerate(trainloader):
 
         source, target, source_neighbors = source.to(device), target.to(device), source_neighbors.to(device)
+        neighbor_mask = None
 
         ############
         if random.random() > 0.7:
             mask = torch.ones((source_neighbors.size(0), 8, 1))
             mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             source_neighbors = source_neighbors * mask
+            neighbor_mask = mask
         ############
 
-        outputs = model(source, source_neighbors)
+        graph_meta = get_batch_graph_meta(trainloader.dataset, samples, device=device, neighbor_keep_mask=neighbor_mask)
+        outputs = model(source, source_neighbors, graph_meta=graph_meta)
         loss = criterion(outputs, target)
 
         optimizer.zero_grad()
@@ -43,18 +47,21 @@ def train_binary(model, criterion, optimizer, trainloader, device=None):
     model.train()
     losses = AverageMeter()
 
-    for batch_idx, (source, target, source_neighbors, _) in enumerate(trainloader):
+    for batch_idx, (source, target, source_neighbors, samples) in enumerate(trainloader):
 
         source, target, source_neighbors = source.to(device), target.to(device), source_neighbors.to(device)
+        neighbor_mask = None
 
         ############
         if random.random() > 0.7:
             mask = torch.ones((source_neighbors.size(0), 8, 1))
             mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             source_neighbors = source_neighbors * mask
+            neighbor_mask = mask
         ############
 
-        outputs = model(source, source_neighbors)
+        graph_meta = get_batch_graph_meta(trainloader.dataset, samples, device=device, neighbor_keep_mask=neighbor_mask)
+        outputs = model(source, source_neighbors, graph_meta=graph_meta)
         outputs = torch.sigmoid(outputs)
         loss = criterion(outputs, target)
 
@@ -77,10 +84,11 @@ def test_regression(model, testloader, if_sigmoid=False, device=None):
 
 
     with torch.no_grad():
-        for _, (source, target, source_neightbors, _) in enumerate(testloader):
+        for _, (source, target, source_neightbors, samples) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
+            graph_meta = get_batch_graph_meta(testloader.dataset, samples, device=device)
+            outputs = model(source, source_neightbors, graph_meta=graph_meta)
 
             if if_sigmoid:
                 outputs = torch.sigmoid(outputs)
@@ -105,10 +113,11 @@ def test_binary(model, testloader, device=None):
 
 
     with torch.no_grad():
-        for _, (source, target, source_neightbors, _) in enumerate(testloader):
+        for _, (source, target, source_neightbors, samples) in enumerate(testloader):
 
             source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
-            outputs = model(source, source_neightbors)
+            graph_meta = get_batch_graph_meta(testloader.dataset, samples, device=device)
+            outputs = model(source, source_neightbors, graph_meta=graph_meta)
             outputs = torch.sigmoid(outputs)
 
             predict_list.append(outputs)

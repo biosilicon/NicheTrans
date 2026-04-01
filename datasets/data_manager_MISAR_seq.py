@@ -16,6 +16,8 @@ from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
+from datasets.local_graph_utils import build_local_graph_metadata
+
 def tfidf3(count_mat): 
     model = TfidfTransformer(smooth_idf=False, norm="l2")
     model = model.fit(np.transpose(count_mat))
@@ -204,8 +206,11 @@ class ATAC_RNA_Seq(object):
 
         ######
         dict_source = {}
+        dict_coord = {}
+        coordinates = source_adata.obsm['spatial'].astype(np.float32)
         for i, index in enumerate(indexes):
             dict_source[index] = source_array[i]
+            dict_coord[index] = coordinates[i]
         #######
         
         for i in range(source_adata.shape[0]):
@@ -213,13 +218,18 @@ class ATAC_RNA_Seq(object):
 
             index = indexes[i]
             source, target = source_array[i], target_array[i]
+            center_coord = dict_coord[index]
 
             for j in graph[index]:
                 source_neighbor.append(dict_source[j])
 
             source_neighbor = np.array(source_neighbor)
+            neighbor_coords = np.array([dict_coord[j] for j in graph[index]], dtype=np.float32)
+            hop_ids = np.ones((len(graph[index]),), dtype=np.int64)
+            valid_neighbor_mask = np.ones((len(graph[index]),), dtype=bool)
+            graph_meta = build_local_graph_metadata(center_coord, neighbor_coords, hop_ids, valid_neighbor_mask)
 
-            dataset.append((source, target, source_neighbor, index))
+            dataset.append((source, target, source_neighbor, index, graph_meta))
 
         return dataset
     

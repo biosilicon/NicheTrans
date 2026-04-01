@@ -14,6 +14,7 @@ os.chdir('/mnt/datadisk0/NicheTrans')
 from captum.attr import IntegratedGradients
 from model.nicheTrans_attribution_SMA import NicheTrans
 from datasets.data_manager_SMA import SMA
+from utils.graph_meta import get_batch_graph_meta
 from utils.utils_dataloader import sma_dataloader
 
 # ── Load args ──────────────────────────────────────────────────────────────
@@ -42,12 +43,17 @@ print("Model loaded.")
 # ── Collect inputs ─────────────────────────────────────────────────────────
 print("Collecting test inputs...")
 input_list = []
+graph_meta_buffer = {}
 with torch.no_grad():
     for imgs, source, target, source_neightbors, _, samples in testloader:
         source_data = torch.cat([source[:, None, :], source_neightbors], dim=1)
         input_list.append(source_data)
+        batch_graph_meta = get_batch_graph_meta(testloader.dataset, samples)
+        for key, value in batch_graph_meta.items():
+            graph_meta_buffer.setdefault(key, []).append(value)
 
 rna_list = torch.cat(input_list, dim=0)
+graph_meta_all = {key: torch.cat(value, dim=0) for key, value in graph_meta_buffer.items()}
 print(f"rna_list shape: {rna_list.shape}")  # [N, 9, 1159]
 
 # ── Integrated Gradients in batches (avoids OOM) ──────────────────────────
@@ -61,7 +67,8 @@ for start in range(0, n, BATCH):
     end = min(start + BATCH, n)
     batch = rna_list[start:end].to(device)
     baseline = torch.zeros_like(batch)
-    attrs = ig.attribute(batch, baseline, target=0, n_steps=N_STEPS)
+    batch_graph_meta = {key: value[start:end].to(device) for key, value in graph_meta_all.items()}
+    attrs = ig.attribute(batch, baseline, target=0, n_steps=N_STEPS, additional_forward_args=(batch_graph_meta,))
     all_attrs.append(attrs.detach().cpu())
     print(f"  [{end}/{n}] done")
 

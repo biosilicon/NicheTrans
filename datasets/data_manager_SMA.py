@@ -8,6 +8,8 @@ import sklearn.neighbors
 
 from collections import defaultdict
 
+from datasets.local_graph_utils import build_local_graph_metadata
+
 
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True):
@@ -214,8 +216,10 @@ class SMA(object):
                     else:
                         # 每个空间位置还会关联一张 histology patch，形成图像 + 组学联合输入。
                         img_path = os.path.join(self.path_img, names[i], key + '.png')
+                        center_coord = np.array([float(item) for item in key.split('_')], dtype=np.float32)
 
                         rna_neighbors, msi_neighbors = [], []
+                        neighbor_coords, hop_ids, valid_neighbor_mask = [], [], []
 
                         neighbors_1, neighbors_2 = graph_1[key], graph_2[key]
                         # 第二圈邻居去掉已被第一圈覆盖的点，避免重复。
@@ -226,8 +230,13 @@ class SMA(object):
                             # 邻居缺失时补零向量，保持固定输入维度。
                             if j not in rna_keys:
                                 rna_neighbors.append(np.zeros_like(rna_temp))
+                                neighbor_coords.append(center_coord.copy())
+                                valid_neighbor_mask.append(False)
                             else:
                                 rna_neighbors.append(rna_dic[j][self.rna_mask])
+                                neighbor_coords.append(np.array([float(item) for item in j.split('_')], dtype=np.float32))
+                                valid_neighbor_mask.append(True)
+                            hop_ids.append(1)
 
                             if j not in msi_keys:
                                 msi_neighbors.append(np.zeros_like(msi_temp))
@@ -239,14 +248,22 @@ class SMA(object):
                             for _ in range(4-len(neighbors_1)):
                                 rna_neighbors.append(np.zeros_like(rna_temp))
                                 msi_neighbors.append(np.zeros_like(msi_temp))
+                                neighbor_coords.append(center_coord.copy())
+                                hop_ids.append(1)
+                                valid_neighbor_mask.append(False)
 
                         # connect to the second round
                         for j in neighbors_2:
                             # 第二圈与第一圈相同，也使用固定长度的邻域编码。
                             if j not in rna_keys:
                                 rna_neighbors.append(np.zeros_like(rna_temp))
+                                neighbor_coords.append(center_coord.copy())
+                                valid_neighbor_mask.append(False)
                             else:
                                 rna_neighbors.append(rna_dic[j][self.rna_mask])
+                                neighbor_coords.append(np.array([float(item) for item in j.split('_')], dtype=np.float32))
+                                valid_neighbor_mask.append(True)
+                            hop_ids.append(2)
 
                             if j not in msi_keys:
                                 msi_neighbors.append(np.zeros_like(msi_temp))
@@ -258,13 +275,17 @@ class SMA(object):
                             for _ in range(4-len(neighbors_2)):
                                 rna_neighbors.append(np.zeros_like(rna_temp))
                                 msi_neighbors.append(np.zeros_like(msi_temp))
+                                neighbor_coords.append(center_coord.copy())
+                                hop_ids.append(2)
+                                valid_neighbor_mask.append(False)
 
                         # 最终一个样本由：
                         # 中心图像 + 中心 RNA + 中心 MSI + 8 个 RNA 邻居 + 8 个 MSI 邻居 + sample id 组成。
                         rna_neighbors = np.stack(rna_neighbors)
                         msi_neighbors = np.stack(msi_neighbors)
+                        graph_meta = build_local_graph_metadata(center_coord, neighbor_coords, hop_ids, valid_neighbor_mask)
 
-                        dataset.append((img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors, names[i] + '/' + key))
+                        dataset.append((img_path, rna_temp, msi_temp, rna_neighbors, msi_neighbors, names[i] + '/' + key, graph_meta))
 
         return dataset
 
