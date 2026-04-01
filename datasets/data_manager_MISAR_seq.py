@@ -5,10 +5,8 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-import sklearn.neighbors
 from scipy.sparse import csr_matrix
 
-from collections import defaultdict
 import episcanpy as epi
 from sklearn.feature_extraction.text import TfidfTransformer
 from sklearn.decomposition import TruncatedSVD
@@ -16,7 +14,7 @@ from sklearn.metrics import pairwise_distances
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
 
-from datasets.local_graph_utils import build_local_graph_metadata
+from datasets.local_graph_utils import build_local_graph_metadata, build_spatial_neighbor_dict
 
 def tfidf3(count_mat): 
     model = TfidfTransformer(smooth_idf=False, norm="l2")
@@ -28,64 +26,28 @@ def tfidf3(count_mat):
 
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True, mouse=False):
-    assert(model in ['Radius', 'KNN'])
-    if verbose:
-        print('------Calculating spatial graph...')
-    # if mouse == True:
-    #     coor = pd.DataFrame(np.stack([adata.obs['x'], adata.obs['y']], axis=1))
-    # else:
-    #     coor = pd.DataFrame(np.stack([adata.obs['array_row'], adata.obs['array_col']], axis=1))
-
-    coor = pd.DataFrame(np.stack([adata.obsm['spatial'][:, 1], adata.obsm['spatial'][:, 0]], axis=1))
-
-    coor.index = adata.obs.index
-    coor.columns = ['imagerow', 'imagecol']
-
-    if model == 'Radius':
-        nbrs = sklearn.neighbors.NearestNeighbors(radius=rad_cutoff).fit(coor)
-        distances, indices = nbrs.radius_neighbors(coor, return_distance=True)
-        KNN_list = []
-        for it in range(indices.shape[0]):
-            # breakpoint()
-            KNN_list.append(pd.DataFrame(zip([it]*indices[it].shape[0], indices[it], distances[it])))
-    
-    if model == 'KNN':
-        nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=k_cutoff+1).fit(coor)
-        distances, indices = nbrs.kneighbors(coor)
-        KNN_list = []
-        for it in range(indices.shape[0]):
-            KNN_list.append(pd.DataFrame(zip([it]*indices.shape[1],indices[it,:], distances[it,:])))
-
-    KNN_df = pd.concat(KNN_list)
-    KNN_df.columns = ['Cell1', 'Cell2', 'Distance']
-
-    Spatial_Net = KNN_df.copy()
-    Spatial_Net = Spatial_Net.loc[Spatial_Net['Distance']>0,]
-    id_cell_trans = dict(zip(range(coor.shape[0]), np.array(coor.index), ))
-    Spatial_Net['Cell1'] = Spatial_Net['Cell1'].map(id_cell_trans)
-    Spatial_Net['Cell2'] = Spatial_Net['Cell2'].map(id_cell_trans)
-    if verbose:
-        print('The graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
-        print('%.4f neighbors per cell on average.' %(Spatial_Net.shape[0]/adata.n_obs))
-
-    adata.uns['Spatial_Net'] = Spatial_Net
-
-    temp_dic = defaultdict(list)
-
-    if mouse == True:
-        for i in range(Spatial_Net.shape[0]):
-            center = Spatial_Net.iloc[i, 0]
-            side = Spatial_Net.iloc[i, 1]
-            temp_dic[center].append(side)
+    coords = np.stack([adata.obsm['spatial'][:, 1], adata.obsm['spatial'][:, 0]], axis=1)
+    if mouse:
+        node_names = np.asarray(adata.obs.index, dtype=object)
     else:
-        for i in range(Spatial_Net.shape[0]):
-            center = Spatial_Net.iloc[i, 0]
-            side = Spatial_Net.iloc[i, 1]
-            center_name = str(adata.obs['array_row'][center]) + '_' + str(adata.obs['array_col'][center])
-            side_name = str(adata.obs['array_row'][side]) + '_' + str(adata.obs['array_col'][side])
-            temp_dic[center_name].append(side_name)
+        node_names = np.array(
+            [
+                f'{row}_{col}'
+                for row, col in zip(adata.obs['array_row'].tolist(), adata.obs['array_col'].tolist())
+            ],
+            dtype=object,
+        )
 
-    return temp_dic
+    return build_spatial_neighbor_dict(
+        coords=coords,
+        index_labels=adata.obs.index,
+        node_names=node_names,
+        rad_cutoff=rad_cutoff,
+        k_cutoff=k_cutoff,
+        model=model,
+        verbose=verbose,
+        adata=adata,
+    )
 
 
 class ATAC_RNA_Seq(object):

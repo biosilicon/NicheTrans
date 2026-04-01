@@ -122,23 +122,5 @@ class AD_Mouse_loader(Dataset):
         return rna, protein, cell, rna_neighbor, cell_neighbor, sample
 
 
-class Embryonic_mouse_brain(Dataset):
-    def __init__(self, dataset, transform=None):
-        self.dataset = dataset
-        self.graph_meta_index = build_graph_meta_index(dataset)
-
-    def __len__(self):
-        return len(self.dataset)
-
-    def get_graph_meta(self, samples):
-        return stack_graph_meta(self.graph_meta_index, samples)
-
-    def __getitem__(self, index):
-        source_temp, target_temp, source_neighbors, sample, _ = self.dataset[index]
-    
-        source_temp = torch.Tensor(source_temp)
-        target_temp = torch.Tensor(target_temp)
-       
-        source_neighbors = torch.Tensor(source_neighbors)
-
-        return source_temp, target_temp, source_neighbors, sample
+class Embryonic_mouse_brain(Lymph_node_loader):
+    """Compatibility wrapper kept for MISAR notebook imports."""

@@ -72,7 +72,7 @@ def human_node_dataloader(args, dataset):
 def embryonic_mouse_brain(args, dataset):
     pin_memory = torch.cuda.is_available()
     trainloader = DataLoader(
-                    Lymph_node_loader(dataset.training),
+                    Embryonic_mouse_brain(dataset.training),
                     batch_size=args.train_batch,
                     shuffle=True,
                     num_workers=args.workers,
@@ -81,7 +81,7 @@ def embryonic_mouse_brain(args, dataset):
                 )
 
     testloader = DataLoader(
-                    Lymph_node_loader(dataset.testing),
+                    Embryonic_mouse_brain(dataset.testing),
                     batch_size=args.test_batch,
                     shuffle=False,
                     num_workers=args.workers,

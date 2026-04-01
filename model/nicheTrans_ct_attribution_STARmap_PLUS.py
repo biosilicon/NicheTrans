@@ -6,42 +6,11 @@ from torch import nn
 
 from model.attention import *
 from model.nicheTrans import *
+from model.nicheTrans import NetBlock as _SharedNetBlock
 
 
-class NetBlock(nn.Module):
-    def __init__(
-        self,
-        nlayer: int,
-        dim_list: list,
-        dropout_rate: float,
-        noise_rate: float,
-    ):
-
-        super(NetBlock, self).__init__()
-        self.nlayer = nlayer
-        self.noise_dropout = nn.Dropout(noise_rate)
-        self.linear_list = nn.ModuleList()
-        self.bn_list = nn.ModuleList()
-        self.activation_list = nn.ModuleList()
-        self.dropout_list = nn.ModuleList()
-
-        for i in range(nlayer):
-            self.linear_list.append(nn.Linear(dim_list[i], dim_list[i + 1]))
-            nn.init.xavier_uniform_(self.linear_list[i].weight)
-            self.bn_list.append(nn.BatchNorm1d(dim_list[i + 1]))
-            self.activation_list.append(nn.LeakyReLU())
-            if not i == nlayer - 1:
-                self.dropout_list.append(nn.Dropout(dropout_rate))
-
-    def forward(self, x):
-        x = self.noise_dropout(x)
-        for i in range(self.nlayer):
-            x = self.linear_list[i](x)
-            x = self.bn_list[i](x)
-            x = self.activation_list[i](x)
-            if not i == self.nlayer - 1:
-                x = self.dropout_list[i](x)
-        return x
+class NetBlock(_SharedNetBlock):
+    """Compatibility wrapper around the shared encoder block."""
 
 
 class NicheTrans_ct(nn.Module):

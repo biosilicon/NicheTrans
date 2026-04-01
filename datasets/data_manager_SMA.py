@@ -4,88 +4,29 @@ import numpy as np
 import pandas as pd
 import scanpy as sc
 
-import sklearn.neighbors
-
-from collections import defaultdict
-
-from datasets.local_graph_utils import build_local_graph_metadata
+from datasets.local_graph_utils import build_local_graph_metadata, build_spatial_neighbor_dict
 
 
 # return the neighborhood nodes 
 def Cal_Spatial_Net_row_col(adata, rad_cutoff=None, k_cutoff=None, model='Radius', verbose=True):
-    """
-    根据 spot 的 array_row 和 array_col 坐标构建空间邻接图。
-
-    参数:
-        adata: AnnData 对象，要求 adata.obs 中包含 `array_row` 和 `array_col`。
-        rad_cutoff: 当 model='Radius' 时使用的半径阈值。
-        k_cutoff: 当 model='KNN' 时使用的近邻个数。
-        model: 邻接图构建方式，支持 'Radius' 或 'KNN'。
-        verbose: 是否打印建图信息。
-
-    返回:
-        temp_dic: 以 "row_col" 为键的邻接字典，值为相邻 spot 的 "row_col" 列表。
-    """
-
-    assert(model in ['Radius', 'KNN'])
-    if verbose:
-        print('------Calculating spatial graph...')
-
-    # 取出每个 spot 的二维空间坐标，并整理成后续近邻搜索所需的 DataFrame。
-    coor = pd.DataFrame(np.stack([adata.obs['array_row'], adata.obs['array_col']], axis=1))
-
-    coor.index = adata.obs.index
-    coor.columns = ['imagerow', 'imagecol']
-
-    if model == 'Radius':
-        # 基于半径搜索邻居，返回每个点在给定半径内的所有邻居及距离。
-        nbrs = sklearn.neighbors.NearestNeighbors(radius=rad_cutoff).fit(coor)
-        distances, indices = nbrs.radius_neighbors(coor, return_distance=True)
-        KNN_list = []
-        for it in range(indices.shape[0]):      #indices是邻居索引列表
-            # 每一行记录: 当前点索引、邻居点索引、两者距离。
-            KNN_list.append(pd.DataFrame(zip([it]*indices[it].shape[0], indices[it], distances[it])))
-    
-    if model == 'KNN':
-        # KNN 会把点自身也算进最近邻，因此这里使用 k_cutoff + 1。
-        nbrs = sklearn.neighbors.NearestNeighbors(n_neighbors=k_cutoff+1).fit(coor)
-        distances, indices = nbrs.kneighbors(coor)
-        KNN_list = []
-        for it in range(indices.shape[0]):
-            KNN_list.append(pd.DataFrame(zip([it]*indices.shape[1],indices[it,:], distances[it,:])))
-
-    # 合并所有点的邻接结果，并统一列名。
-    KNN_df = pd.concat(KNN_list)
-    KNN_df.columns = ['Cell1', 'Cell2', 'Distance']     #Cell1是中心细胞，Cell2是邻居细胞， Distance是距离
-
-    Spatial_Net = KNN_df.copy()
-    # 去掉自己到自己的连边，仅保留真实邻居关系。
-    Spatial_Net = Spatial_Net.loc[Spatial_Net['Distance']>0,]
-    # 将整数索引映射回 adata.obs 中原始的 spot 名称。
-    id_cell_trans = dict(zip(range(coor.shape[0]), np.array(coor.index), ))
-    Spatial_Net['Cell1'] = Spatial_Net['Cell1'].map(id_cell_trans)
-    Spatial_Net['Cell2'] = Spatial_Net['Cell2'].map(id_cell_trans)
-    if verbose:
-        print('The graph contains %d edges, %d cells.' %(Spatial_Net.shape[0], adata.n_obs))
-        print('%.4f neighbors per cell on average.' %(Spatial_Net.shape[0]/adata.n_obs))
-
-    # 将边表保存到 AnnData 中，便于后续复用。
-    adata.uns['Spatial_Net'] = Spatial_Net
-
-    # 构建 "row_col" -> 邻接 "row_col" 列表的字典格式输出。
-    temp_dic = defaultdict(list)
-    for i in range(Spatial_Net.shape[0]):
-
-        center = Spatial_Net.iloc[i, 0]
-        side = Spatial_Net.iloc[i, 1]
-
-        # 用 array_row 和 array_col 拼接出 spot 的二维坐标名称。
-        center_name = str(adata.obs['array_row'][center]) + '_' + str(adata.obs['array_col'][center])
-        side_name = str(adata.obs['array_row'][side]) + '_' + str(adata.obs['array_col'][side])
-
-        temp_dic[center_name].append(side_name)
-
-    return temp_dic
+    coords = np.stack([adata.obs['array_row'], adata.obs['array_col']], axis=1)
+    node_names = np.array(
+        [
+            f'{row}_{col}'
+            for row, col in zip(adata.obs['array_row'].tolist(), adata.obs['array_col'].tolist())
+        ],
+        dtype=object,
+    )
+    return build_spatial_neighbor_dict(
+        coords=coords,
+        index_labels=adata.obs.index,
+        node_names=node_names,
+        rad_cutoff=rad_cutoff,
+        k_cutoff=k_cutoff,
+        model=model,
+        verbose=verbose,
+        adata=adata,
+    )
 
 
 class SMA(object):

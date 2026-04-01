@@ -1,38 +1,6 @@
 import torch
 import scipy
-import math
 import numpy as np
-import warnings
-
-import matplotlib.pyplot as plt
-
-
-def draw_dot_plots(predict_list, target_list, pearson_sample_list, norm_rmse_list, panel, training=True):
-    for i in range(predict_list.shape[1]):
-
-        predict = predict_list[:, i]
-        targets = target_list[:, i]
-
-        max_val = max(max(predict), max(targets))
-        lim = (0, max_val)
-        plt.plot(lim, lim, color='red', linestyle='--')
-
-        plt.figure(figsize=(8, 6))
-        plt.scatter(predict, targets, color='blue', alpha=0.5)
-        plt.plot(lim, lim, color='red', linestyle='--', linewidth=2)
-
-        plt.xlim(lim)
-        plt.ylim(lim)
-
-        plt.xlabel('Predicted Number')
-        plt.ylabel('Ground Truth')
-        plt.title('Predicted vs. Ground Truth: Pearson {} and norm rmse {} of Panel {}'.format(str(pearson_sample_list[i])[0:5], str(norm_rmse_list[i])[0:5], panel[i]))
-        plt.grid(True)
-        if training==True:
-            plt.savefig('./plots/training_{}_{}.jpg'.format(panel[i], str(i)))
-        else:
-            plt.savefig('./plots/testing_{}_{}.jpg'.format(panel[i], str(i)))
-        plt.close()
 
 
 def evaluator(predict_list, target_list):
