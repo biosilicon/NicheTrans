@@ -7,21 +7,20 @@ from utils.utils import AverageMeter
 from utils.evaluation import evaluator
 
 
-def train(model, criterion, optimizer, trainloader):
+def train(model, criterion, optimizer, trainloader,device):
     model.train()
     losses = AverageMeter()
 
     for batch_idx, (rna, protein, rna_neighbors, _) in enumerate(trainloader):
 
-        rna, protein, rna_neighbors = rna.cuda(), protein.cuda(), rna_neighbors.cuda()
-
+        rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
         ############
         if random.random() > 0.7:
             mask = torch.ones((rna_neighbors.size(0), rna_neighbors.size(1), 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).cuda()
+            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             rna_neighbors = rna_neighbors * mask
         ############
-
+    torch.set_num_threads(32)
         source, target, source_neightbors = rna, protein, rna_neighbors
        
         outputs = model(source, source_neightbors)
@@ -37,13 +36,13 @@ def train(model, criterion, optimizer, trainloader):
             print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx+1, len(trainloader), losses.val, losses.avg))
 
 
-def test(model, testloader):
+def test(model, testloader,device):
     model.eval()
     predict_list, target_list = [], []
     
     with torch.no_grad():
         for _, (rna, protein, rna_neighbors, _) in enumerate(testloader):
-            rna, protein, rna_neighbors = rna.cuda(), protein.cuda(), rna_neighbors.cuda()
+            rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
             source, target, source_neightbors = rna, protein, rna_neighbors
 
             outputs = model(source, source_neightbors)

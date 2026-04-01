@@ -14,7 +14,7 @@ def train_regression(model, criterion, optimizer, trainloader):
 
     for batch_idx, (source, target, source_neighbors, _) in enumerate(trainloader):
 
-        source, target, source_neighbors = source.cuda(), target.cuda(), source_neighbors.cuda()
+        source, target, source_neighbors = source.cpu(), target.cuda(), source_neighbors.cuda()
 
         ############
         if random.random() > 0.7:

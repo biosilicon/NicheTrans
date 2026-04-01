@@ -5,7 +5,7 @@ import torchvision
 from torch import nn
 
 from model.attention import *
-from model.nicheTrans import *
+from model.nicheTrans_ori import *
 
 
 class NicheTrans_img(nn.Module):

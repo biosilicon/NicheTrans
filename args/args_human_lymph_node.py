@@ -12,7 +12,7 @@ def generate_args():
     parser.add_argument('-j', '--workers', default=4, type=int,
                         help="number of data loading workers (default: 4)")
     
-    parser.add_argument('--adata_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2024_nm_human_lymph_nodes/', type=str)
+    parser.add_argument('--adata_path', default='/mnt/datadisk0/Processed_DATA/2024_nm_human_lymph_nodes/', type=str)
 
     # Training options
     parser.add_argument('--max-epoch', default=20, type=int,

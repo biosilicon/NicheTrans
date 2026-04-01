@@ -17,7 +17,7 @@ def generate_args():
     parser.add_argument('--peak_threshold', default=0.05, type=float)
     parser.add_argument('--hvg_gene', default=1500, type=float)
     
-    parser.add_argument('--adata_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nm_MISAR_seq', type=str)
+    parser.add_argument('--adata_path', default='/mnt/datadisk0/Processed_DATA/2023_nm_MISAR_seq', type=str)
 
     # Training options
     parser.add_argument('--max-epoch', default=20, type=int,

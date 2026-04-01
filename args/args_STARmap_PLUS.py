@@ -10,8 +10,8 @@ def generate_args():
     parser.add_argument('-j', '--workers', default=4, type=int,
                         help="number of data loading workers (default: 4)")
 
-    parser.add_argument('--AD_adata_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nn_AD_mouse/AD_model_adata_protein', type=str)
-    parser.add_argument('--Wild_type_adata_path', default='/home/wzk/ST_code/NicheTrans/2024_NicheTrans_upload_data/2023_nn_AD_mouse/wild_type_adata_protein', type=str)
+    parser.add_argument('--AD_adata_path', default='/mnt/datadisk0/Processed_DATA/2023_nn_AD_mouse/AD_model_adata_protein', type=str)
+    parser.add_argument('--Wild_type_adata_path', default='/mnt/datadisk0/Processed_DATA/2023_nn_AD_mouse/wild_type_adata_protein', type=str)
 
     # Training options
     parser.add_argument('--max-epoch', default=20, type=int,

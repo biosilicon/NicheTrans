@@ -9,32 +9,34 @@ from utils.utils import AverageMeter
 from sklearn.metrics import roc_auc_score, confusion_matrix
 
 
-def train(model, criterion, optimizer, trainloader, ct_information=False):
+def train(model, criterion, optimizer, trainloader, ct_information=False, device=None):
+    if device is None:
+        device = next(model.parameters()).device
     model.train()
     losses = AverageMeter()
     for batch_idx, (rna, protein, cell, rna_neighbors, cell_neighbor, _) in enumerate(trainloader):
 
-        rna, protein, rna_neighbors = rna.cuda(), protein.cuda(), rna_neighbors.cuda()
-        cell, cell_neighbor = cell.cuda(), cell_neighbor.cuda()
-        
+        rna, protein, rna_neighbors = rna.to(device), protein.to(device), rna_neighbors.to(device)
+        cell, cell_neighbor = cell.to(device), cell_neighbor.to(device)
+
         ############
         if random.random() > 0.7:
             mask = torch.ones((rna_neighbors.size(0), rna_neighbors.size(1), 1))
-            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).cuda()
+            mask = torch.bernoulli(torch.full(mask.shape, 0.5)).to(device)
             rna_neighbors = rna_neighbors * mask
             cell_neighbor = cell_neighbor * mask
         ############
 
         cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1)
         source, target, source_neightbors = rna, protein, rna_neighbors
-        
+
         if ct_information == True:
             outputs = model(source, source_neightbors, cell_inf)
-        else: 
+        else:
             outputs = model(source, source_neightbors)
         outputs = torch.sigmoid(outputs)
 
-        loss = criterion(outputs, target) 
+        loss = criterion(outputs, target)
 
         optimizer.zero_grad()
         loss.backward()
@@ -45,20 +47,22 @@ def train(model, criterion, optimizer, trainloader, ct_information=False):
             print("Batch {}/{}\t Loss {:.6f} ({:.6f})".format(batch_idx+1, len(trainloader), losses.val, losses.avg))
 
 
-def test(model, testloader, ct_information=False):
+def test(model, testloader, ct_information=False, device=None):
+    if device is None:
+        device = next(model.parameters()).device
     model.eval()
 
     predict_list, target_list = [], []
-    
+
     with torch.no_grad():
         for _, (source, target, cell, source_neightbors, cell_neighbor, _) in enumerate(testloader):
 
-            source, target, source_neightbors = source.cuda(), target.cuda(), source_neightbors.cuda()
-            cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1).cuda()
+            source, target, source_neightbors = source.to(device), target.to(device), source_neightbors.to(device)
+            cell_inf = torch.cat([cell[:, None, :], cell_neighbor], dim=1).to(device)
 
             if ct_information == True:
                 outputs = model(source, source_neightbors, cell_inf)
-            else: 
+            else:
                 outputs = model(source, source_neightbors)
             outputs = torch.sigmoid(outputs)
             
