@@ -94,33 +94,6 @@ def infer_hop_ids(num_nodes, batch_size, device):
     return hop_ids
 
 
-def build_fallback_coords(hop_ids, valid_mask, dtype):
-    batch_size, num_nodes = hop_ids.shape
-    coords = torch.zeros((batch_size, num_nodes, 2), device=hop_ids.device, dtype=dtype)
-
-    if num_nodes == 1:
-        return coords
-
-    for hop_value, radius in ((1, 1.0), (2, 2.0)):
-        hop_mask = (hop_ids == hop_value) & valid_mask
-        for batch_index in range(batch_size):
-            node_indices = torch.nonzero(hop_mask[batch_index], as_tuple=False).flatten()
-            count = int(node_indices.numel())
-            if count == 0:
-                continue
-            angles = torch.linspace(
-                0,
-                2 * math.pi,
-                steps=count + 1,
-                device=hop_ids.device,
-                dtype=dtype,
-            )[:-1]
-            coords[batch_index, node_indices, 0] = torch.cos(angles) * radius
-            coords[batch_index, node_indices, 1] = torch.sin(angles) * radius
-
-    return coords
-
-
 def build_local_role_tokens(token_center, token_neigh_1, token_neigh_2, num_neighbors, valid_mask=None, hop_ids=None):
     if hop_ids is None:
         batch_size = 1 if valid_mask is None else valid_mask.size(0)
@@ -171,7 +144,6 @@ class PairwiseStructureBuilder(nn.Module):
     def __init__(
         self,
         num_roles=3,
-        num_direction_bins=8,
         distance_bin_edges=(0.5, 0.9, 1.25, 1.75, 2.5, 3.5),
         max_shortest_path_distance=4,
         max_degree=16,
@@ -179,18 +151,15 @@ class PairwiseStructureBuilder(nn.Module):
     ):
         super().__init__()
         self.num_roles = num_roles
-        self.num_direction_bins = num_direction_bins
         self.max_shortest_path_distance = max_shortest_path_distance
         self.max_degree = max_degree
         self.max_cell_types = max_cell_types
 
         self.register_buffer('distance_bin_edges', torch.tensor(distance_bin_edges, dtype=torch.float32))
 
-        self.continuous_dim = 6
+        self.continuous_dim = 3
         self.num_distance_buckets = len(distance_bin_edges) + 3
         self.distance_unknown_idx = self.num_distance_buckets - 1
-        self.num_direction_buckets = num_direction_bins + 2
-        self.direction_unknown_idx = self.num_direction_buckets - 1
         self.num_role_pair_buckets = (num_roles * num_roles) + 1
         self.role_pair_unknown_idx = self.num_role_pair_buckets - 1
         self.num_hop_delta_buckets = num_roles + 1
@@ -222,13 +191,13 @@ class PairwiseStructureBuilder(nn.Module):
         local_scale = torch.where(local_scale > 0, local_scale, torch.ones_like(local_scale))
         return local_scale.clamp(min=1e-6)
 
-    def _build_shortest_path_bucket(self, adjacency_mask, valid_mask):
+    def _build_shortest_path_distance(self, adjacency_mask, valid_mask, dtype):
         batch_size, num_nodes, _ = adjacency_mask.shape
         device = adjacency_mask.device
         eye = torch.eye(num_nodes, device=device, dtype=torch.bool).unsqueeze(0)
 
         inf = float(self.shortest_path_unknown_idx)
-        distance = torch.full((batch_size, num_nodes, num_nodes), inf, device=device)
+        distance = torch.full((batch_size, num_nodes, num_nodes), inf, device=device, dtype=dtype)
         edge_mask = adjacency_mask & ~eye
         distance = distance.masked_fill(edge_mask, 1.0)
         distance = torch.where(eye, torch.zeros_like(distance), distance)
@@ -240,44 +209,44 @@ class PairwiseStructureBuilder(nn.Module):
             )
             distance = torch.minimum(distance, via_intermediate)
 
-        shortest_path_bucket = distance.clamp(max=float(self.shortest_path_unknown_idx)).long()
         valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
-        shortest_path_bucket = torch.where(
+        return torch.where(
             valid_pairs,
-            shortest_path_bucket,
-            torch.full_like(shortest_path_bucket, self.shortest_path_unknown_idx),
+            distance,
+            torch.full_like(distance, inf),
         )
-        return shortest_path_bucket
 
-    def forward(self, node_coords, hop_ids, valid_mask, adjacency_mask, cell_inf=None):
-        batch_size, num_nodes, _ = node_coords.shape
-        device = node_coords.device
-        dtype = node_coords.dtype
+    def forward(self, node_coords, hop_ids, valid_mask, adjacency_mask, cell_inf=None, feature_dtype=None):
+        batch_size, num_nodes = hop_ids.shape
+        device = adjacency_mask.device
+        dtype = feature_dtype if feature_dtype is not None else self.distance_bin_edges.dtype
         valid_pairs = valid_mask[:, :, None] & valid_mask[:, None, :]
         pair_mask = adjacency_mask & valid_pairs
         eye = torch.eye(num_nodes, device=device, dtype=torch.bool).unsqueeze(0)
 
-        rel_coords = node_coords[:, None, :, :] - node_coords[:, :, None, :]
-        dx = rel_coords[..., 0]
-        dy = rel_coords[..., 1]
-        distance = torch.sqrt(dx.pow(2) + dy.pow(2) + 1e-8)
-        distance = torch.where(eye, torch.zeros_like(distance), distance)
+        shortest_path_distance = self._build_shortest_path_distance(adjacency_mask, valid_mask, dtype)
+        shortest_path_bucket = shortest_path_distance.clamp(max=float(self.shortest_path_unknown_idx)).long()
 
-        local_scale = self._build_local_scale(node_coords, valid_mask)
-        scaled = local_scale[:, None, None]
-        normalized_dx = dx / scaled
-        normalized_dy = dy / scaled
-        normalized_distance = distance / scaled
+        if exists(node_coords):
+            # Coordinates are used only for direction-invariant radial distances.
+            distance = torch.cdist(node_coords, node_coords)
+            distance = torch.where(eye, torch.zeros_like(distance), distance)
+
+            local_scale = self._build_local_scale(node_coords, valid_mask)
+            normalized_distance = distance / local_scale[:, None, None]
+        else:
+            distance = shortest_path_distance
+            normalized_distance = shortest_path_distance
+
+        distance = torch.where(valid_pairs, distance, torch.zeros_like(distance))
+        normalized_distance = torch.where(valid_pairs, normalized_distance, torch.zeros_like(normalized_distance))
         log_distance = torch.log1p(normalized_distance)
 
         continuous_features = torch.stack(
             [
-                normalized_dx,
-                normalized_dy,
+                distance,
                 normalized_distance,
                 log_distance,
-                normalized_dx.abs(),
-                normalized_dy.abs(),
             ],
             dim=-1,
         )
@@ -289,18 +258,6 @@ class PairwiseStructureBuilder(nn.Module):
             valid_pairs,
             distance_bucket,
             torch.full_like(distance_bucket, self.distance_unknown_idx),
-        )
-
-        angle = torch.remainder(torch.atan2(dy, dx) + (2 * math.pi), 2 * math.pi)
-        direction_bucket = torch.floor(
-            angle / ((2 * math.pi) / float(self.num_direction_bins))
-        ).long() + 1
-        direction_bucket = direction_bucket.clamp(max=self.num_direction_bins)
-        direction_bucket = torch.where(eye, torch.zeros_like(direction_bucket), direction_bucket)
-        direction_bucket = torch.where(
-            valid_pairs,
-            direction_bucket,
-            torch.full_like(direction_bucket, self.direction_unknown_idx),
         )
 
         role_ids = hop_ids.clamp(min=0, max=self.num_roles - 1)
@@ -332,8 +289,6 @@ class PairwiseStructureBuilder(nn.Module):
         edge_type = torch.where(same_hop_edge, torch.full_like(edge_type, 2), edge_type)
         edge_type = torch.where(cross_hop_edge, torch.full_like(edge_type, 3), edge_type)
 
-        shortest_path_bucket = self._build_shortest_path_bucket(adjacency_mask, valid_mask)
-
         degree = adjacency_mask.long().sum(dim=-1) - valid_mask.long()
         degree = degree.clamp(min=0, max=self.max_degree)
         degree_ids = torch.where(
@@ -358,13 +313,10 @@ class PairwiseStructureBuilder(nn.Module):
 
         return {
             'pair_mask': pair_mask,
-            'dx': dx,
-            'dy': dy,
             'distance': distance,
             'normalized_distance': normalized_distance,
             'continuous_features': continuous_features,
             'distance_bucket': distance_bucket,
-            'direction_bucket': direction_bucket,
             'role_ids': role_ids,
             'role_pair_id': role_pair_id,
             'hop_delta': hop_delta,
@@ -383,7 +335,6 @@ class PairwiseStructuralBias(nn.Module):
         hidden_dim,
         continuous_dim,
         num_distance_buckets,
-        num_direction_buckets,
         num_role_pair_buckets,
         num_hop_delta_buckets,
         num_edge_types,
@@ -399,7 +350,6 @@ class PairwiseStructuralBias(nn.Module):
             nn.Linear(hidden_dim, hidden_dim),
         )
         self.distance_embedding = nn.Embedding(num_distance_buckets, hidden_dim)
-        self.direction_embedding = nn.Embedding(num_direction_buckets, hidden_dim)
         self.role_pair_embedding = nn.Embedding(num_role_pair_buckets, hidden_dim)
         self.hop_delta_embedding = nn.Embedding(num_hop_delta_buckets, hidden_dim)
         self.edge_type_embedding = nn.Embedding(num_edge_types, hidden_dim)
@@ -416,7 +366,6 @@ class PairwiseStructuralBias(nn.Module):
     def forward(self, relation_features):
         pair_repr = self.continuous_mlp(relation_features['continuous_features'])
         pair_repr = pair_repr + self.distance_embedding(relation_features['distance_bucket'])
-        pair_repr = pair_repr + self.direction_embedding(relation_features['direction_bucket'])
         pair_repr = pair_repr + self.role_pair_embedding(relation_features['role_pair_id'])
         pair_repr = pair_repr + self.hop_delta_embedding(relation_features['hop_delta'])
         pair_repr = pair_repr + self.edge_type_embedding(relation_features['edge_type'])
@@ -463,7 +412,6 @@ class RelationAwareGraphSelfAttention(nn.Module):
             hidden_dim=relation_hidden_dim,
             continuous_dim=structure_builder.continuous_dim,
             num_distance_buckets=structure_builder.num_distance_buckets,
-            num_direction_buckets=structure_builder.num_direction_buckets,
             num_role_pair_buckets=structure_builder.num_role_pair_buckets,
             num_hop_delta_buckets=structure_builder.num_hop_delta_buckets,
             num_edge_types=structure_builder.num_edge_types,
@@ -550,7 +498,6 @@ class LocalGraphTransformerEncoder(nn.Module):
         ff_mult=2,
         neighbor_knn=3,
         relation_hidden_dim=64,
-        num_direction_bins=8,
         distance_bin_edges=(0.5, 0.9, 1.25, 1.75, 2.5, 3.5),
         max_shortest_path_distance=4,
         max_degree=16,
@@ -560,7 +507,6 @@ class LocalGraphTransformerEncoder(nn.Module):
         self.neighbor_knn = neighbor_knn
         self.structure_builder = PairwiseStructureBuilder(
             num_roles=3,
-            num_direction_bins=num_direction_bins,
             distance_bin_edges=distance_bin_edges,
             max_shortest_path_distance=max_shortest_path_distance,
             max_degree=max_degree,
@@ -660,7 +606,7 @@ class LocalGraphTransformerEncoder(nn.Module):
         if graph_meta is not None and 'coords' in graph_meta:
             node_coords = graph_meta['coords'].to(device=device, dtype=dtype)
         else:
-            node_coords = build_fallback_coords(hop_ids, valid_mask, dtype)
+            node_coords = None
 
         adjacency_mask = self.build_adjacency_mask(valid_mask, node_coords=node_coords, hop_ids=hop_ids)
         relation_features = self.structure_builder(
@@ -669,6 +615,7 @@ class LocalGraphTransformerEncoder(nn.Module):
             valid_mask,
             adjacency_mask,
             cell_inf=cell_inf,
+            feature_dtype=dtype,
         )
 
         return {
@@ -716,7 +663,6 @@ class LocalGraphTransformerEncoder(nn.Module):
                 'role_names': self.structure_builder.ROLE_NAMES,
                 'edge_type_names': self.structure_builder.EDGE_TYPE_NAMES,
                 'distance_bin_edges': self.structure_builder.distance_bin_edges.detach().cpu().tolist(),
-                'num_direction_bins': self.structure_builder.num_direction_bins,
             }
             return x * node_mask, graph_state
 
