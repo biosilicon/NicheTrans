@@ -2,3 +2,9 @@
 *.pyc
 .conda-pkgs
 .conda-smoke
+*.png
+*.pth
+*.npy
+executed.ipynb
+.gitignore
+.gitignore
