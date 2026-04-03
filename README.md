@@ -43,6 +43,56 @@ We provide the jupyter notebook for quantitative evaluation using pcc, spcc, and
 ```bash
 Tutorial 3.2 Visualize results.ipynb
 ```
+
+## Batch Sweep On Linux
+If you want to train with multiple hyper-parameter combinations and save the evaluation results automatically, you can use:
+
+```bash
+python train_sweep.py --dataset sma \
+  --set path_img=/your/data/patches \
+  --set rna_path=/your/data/sma \
+  --set msi_path=/your/data/sma \
+  --set max_epoch=20 \
+  --grid lr=0.0003,0.0001 \
+  --grid dropout_rate=0.1,0.2 \
+  --grid num_experts=1,4
+```
+
+The script writes one folder per run and stores:
+
+```bash
+config.json
+history.jsonl
+best_model.pth
+last_model.pth
+metrics.json
+summary.csv
+summary.jsonl
+```
+
+You can also use a JSON config file:
+
+```json
+{
+  "set": {
+    "max_epoch": 20,
+    "path_img": "/your/data/patches",
+    "rna_path": "/your/data/sma",
+    "msi_path": "/your/data/sma"
+  },
+  "grid": {
+    "lr": [0.0003, 0.0001],
+    "dropout_rate": [0.1, 0.2],
+    "num_experts": [1, 4]
+  }
+}
+```
+
+Example:
+
+```bash
+python train_sweep.py --dataset sma --grid-file sweep.json
+```
 ## Model attribution analysis
 Apart from the spatial cross-omics translation, we also provided guidelines for attribution analysis in 'Tutorial 3.3', 'Tutorial 6.5', and 'Tutorial 6.6'.
 
