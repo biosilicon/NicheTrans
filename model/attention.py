@@ -64,6 +64,32 @@ class SoftmaxGate(nn.Module):
         return self.net(x).softmax(dim=-1)
 
 
+def compute_expert_entropy(weights, eps=1e-12):
+    clipped = weights.clamp_min(eps)
+    return -(clipped * clipped.log()).sum(dim=-1)
+
+
+def build_moe_output(predictions, routing_info, center_token_index=0):
+    """Package prediction tensors together with center-token MoE routing metadata."""
+    if routing_info is None:
+        return {"predictions": predictions, "moe_info": None}
+
+    gate_weights = routing_info["gate_weights"]
+    if gate_weights.ndim >= 3:
+        center_gate_weights = gate_weights[:, center_token_index, :]
+    else:
+        center_gate_weights = gate_weights
+
+    moe_info = {
+        **routing_info,
+        "center_token_index": center_token_index,
+        "center_gate_weights": center_gate_weights,
+        "center_top1_expert": center_gate_weights.argmax(dim=-1),
+        "center_entropy": compute_expert_entropy(center_gate_weights),
+    }
+    return {"predictions": predictions, "moe_info": moe_info}
+
+
 class FeedForward(nn.Module):
     def __init__(
         self,
@@ -103,15 +129,46 @@ class FeedForward(nn.Module):
         else:
             self.gate = None
 
-    def forward(self, x):
+    def forward(self, x, return_routing=False):
         if not self.use_moe:
-            return self.net(x)
+            output = self.net(x)
+            if not return_routing:
+                return output
+
+            gate_weights = torch.ones(
+                *x.shape[:-1],
+                1,
+                device=x.device,
+                dtype=output.dtype
+            )
+            routing_info = {
+                "gate_weights": gate_weights,
+                "top1_expert": torch.zeros(
+                    *x.shape[:-1],
+                    device=x.device,
+                    dtype=torch.long
+                ),
+                "num_experts": 1,
+                "gate_type": "single_expert",
+            }
+            return output, routing_info
 
         expert_outputs = [self.net(x)]
         expert_outputs.extend(expert(x) for expert in self.extra_experts)
         expert_outputs = torch.stack(expert_outputs, dim=-2)
-        mixture_weights = self.gate(x).unsqueeze(dim=-1)
-        return (expert_outputs * mixture_weights).sum(dim=-2)
+        gate_weights = self.gate(x)
+        output = (expert_outputs * gate_weights.unsqueeze(dim=-1)).sum(dim=-2)
+
+        if not return_routing:
+            return output
+
+        routing_info = {
+            "gate_weights": gate_weights,
+            "top1_expert": gate_weights.argmax(dim=-1),
+            "num_experts": self.num_experts,
+            "gate_type": self.gate_type,
+        }
+        return output, routing_info
 
     def _prepare_legacy_moe_state_dict(self, state_dict, prefix):
         if self.use_moe:

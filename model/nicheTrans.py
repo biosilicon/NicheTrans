@@ -115,7 +115,7 @@ class NicheTrans(nn.Module):
         trunc_normal_(self.token_neigh_2, std=.02)
 
 
-    def forward(self, source, source_neighbor):
+    def forward(self, source, source_neighbor, return_moe_info=False):
         # 当前 batch 大小，即中心细胞/spot 的数量。
         b = source.size(0)
         # 邻居 token 数量，通常对应每个中心位置拼接进来的邻域样本数。
@@ -141,7 +141,12 @@ class NicheTrans(nn.Module):
         # 自注意力残差块：先 LayerNorm，再做 token 间信息交互，最后与输入残差相加。
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
         # 前馈网络残差块：对每个 token 的表示逐位置变换，并保留残差连接。
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        if return_moe_info:
+            ffn_out, routing_info = self.ffn_omic(self.ln2(f_omic), return_routing=True)
+        else:
+            ffn_out = self.ffn_omic(self.ln2(f_omic))
+            routing_info = None
+        f_omic = ffn_out + f_omic
 
         # 仅取第 0 个 token（中心位置）的表示做最终预测，并施加 dropout。
         f = self.dropout(f_omic[:, 0, :])
@@ -153,5 +158,7 @@ class NicheTrans(nn.Module):
         # 将所有单维预测结果拼接成最终输出 [b, target_length]。
         out = torch.cat(out, dim=1)
 
+        if return_moe_info:
+            return build_moe_output(out, routing_info, center_token_index=0)
         return out
     

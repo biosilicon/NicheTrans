@@ -110,7 +110,7 @@ class NicheTrans(nn.Module):
         trunc_normal_(self.token_neigh_2, std=.02)
 
 
-    def forward(self, source, source_neighbor):
+    def forward(self, source, source_neighbor, return_moe_info=False):
         b = source.size(0)
         l = source_neighbor.size(1)
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, l//2, 1), self.token_neigh_2.repeat(1, l//2, 1)], dim=1)
@@ -125,12 +125,19 @@ class NicheTrans(nn.Module):
         f_omic = self.non_linear(f_omic)
 
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        if return_moe_info:
+            ffn_out, routing_info = self.ffn_omic(self.ln2(f_omic), return_routing=True)
+        else:
+            ffn_out = self.ffn_omic(self.ln2(f_omic))
+            routing_info = None
+        f_omic = ffn_out + f_omic
 
         f = self.dropout(f_omic[:, 0, :])
 
         # final prediction
         out = self.predict_layers(f)
 
+        if return_moe_info:
+            return build_moe_output(out, routing_info, center_token_index=0)
         return out
     

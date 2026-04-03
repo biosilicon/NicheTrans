@@ -119,7 +119,7 @@ class NicheTrans_ct(nn.Module):
         trunc_normal_(self.token_neigh_1, std=.02)
         trunc_normal_(self.token_neigh_2, std=.02)
        
-    def forward(self, source, source_neighbor, cell_inf):
+    def forward(self, source, source_neighbor, cell_inf, return_moe_info=False):
         b = source.size(0)
 
         classes_tokens = (self.cell_tokens * cell_inf.unsqueeze(dim=-1)).sum(-2)
@@ -136,7 +136,12 @@ class NicheTrans_ct(nn.Module):
         f_omic = self.projection_rna(f_omic)
 
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        if return_moe_info:
+            ffn_out, routing_info = self.ffn_omic(self.ln2(f_omic), return_routing=True)
+        else:
+            ffn_out = self.ffn_omic(self.ln2(f_omic))
+            routing_info = None
+        f_omic = ffn_out + f_omic
 
         f_omic = f_omic[:, 0, :]
         f = self.dropout(f_omic)
@@ -147,4 +152,6 @@ class NicheTrans_ct(nn.Module):
             out.append(self.predict_layers[i](f))
         out = torch.cat(out, dim=1)
 
+        if return_moe_info:
+            return build_moe_output(out, routing_info, center_token_index=0)
         return out

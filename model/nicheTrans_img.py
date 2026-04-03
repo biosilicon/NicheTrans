@@ -95,7 +95,7 @@ class NicheTrans_img(nn.Module):
         trunc_normal_(self.token_neigh_2, std=.02)
         ################
 
-    def forward(self, img, source, source_neighbor):
+    def forward(self, img, source, source_neighbor, return_moe_info=False):
         b = img.size(0)
 
         spatial_tokens = torch.cat([self.token_center, self.token_neigh_1.repeat(1, 4, 1), self.token_neigh_2.repeat(1, 4, 1)], dim=1)
@@ -110,7 +110,12 @@ class NicheTrans_img(nn.Module):
         f_omic = self.non_linear(f_omic)
 
         f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        f_omic = self.ffn_omic(self.ln2(f_omic)) + f_omic
+        if return_moe_info:
+            ffn_out, routing_info = self.ffn_omic(self.ln2(f_omic), return_routing=True)
+        else:
+            ffn_out = self.ffn_omic(self.ln2(f_omic))
+            routing_info = None
+        f_omic = ffn_out + f_omic
         
         # image feature extraction
         f_img = self.pooling(self.base(img)).squeeze()
@@ -126,4 +131,6 @@ class NicheTrans_img(nn.Module):
             out.append(self.predict_layers[i](f))
         out = torch.cat(out, dim=1)
 
+        if return_moe_info:
+            return build_moe_output(out, routing_info, center_token_index=0)
         return out
