@@ -4,6 +4,12 @@ def generate_args():
     parser = argparse.ArgumentParser(description='Multi-omics translation')
     parser.add_argument('--noise_rate', default=0.5, type=float)  # 0.5
     parser.add_argument('--dropout_rate', default=0.25, type=float)
+    parser.add_argument('--use_moe_ffn', default=True,
+                        type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
+    parser.add_argument('--num_experts', default=1, type=int)
+    parser.add_argument('--moe_gate_hidden_dim', default=0, type=int)
+    parser.add_argument('--moe_gate_type', default='softmax', type=str)
+    parser.add_argument('--ffn_mult', default=2, type=int)
     parser.add_argument('--n_top_genes', default=2000, type=int)
 
     # Datasets

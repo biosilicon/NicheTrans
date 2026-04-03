@@ -47,11 +47,27 @@ class NetBlock(nn.Module):
 
 class NicheTrans_ct(nn.Module):
     # def __init__(self, rna_length=877, msi_length=137):
-    def __init__(self, source_length=877, target_length=137, noise_rate=0.2, dropout_rate=0.1):
+    def __init__(
+        self,
+        source_length=877,
+        target_length=137,
+        noise_rate=0.2,
+        dropout_rate=0.1,
+        use_moe_ffn=True,
+        num_experts=1,
+        moe_gate_hidden_dim=None,
+        moe_gate_type='softmax',
+        ffn_mult=2
+    ):
         super(NicheTrans_ct, self).__init__()
 
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
+        self.use_moe_ffn = use_moe_ffn
+        self.num_experts = max(int(num_experts), 1)
+        self.moe_gate_hidden_dim = None if moe_gate_hidden_dim in (None, 0) else int(moe_gate_hidden_dim)
+        self.moe_gate_type = moe_gate_type
+        self.ffn_mult = int(ffn_mult)
 
         self.fea_size, self.img_size = 256, 256
 
@@ -62,7 +78,15 @@ class NicheTrans_ct(nn.Module):
                                             nn.ReLU(inplace=True))
 
         self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
-        self.ffn_omic = FeedForward(dim=self.fea_size, mult=2)
+        self.ffn_omic = FeedForward(
+            dim=self.fea_size,
+            mult=self.ffn_mult,
+            dropout=self.dropout_rate,
+            num_experts=self.num_experts,
+            gate_hidden_dim=self.moe_gate_hidden_dim,
+            use_moe=self.use_moe_ffn,
+            gate_type=self.moe_gate_type
+        )
 
         self.ln1 = nn.LayerNorm(self.fea_size)
         self.ln2 = nn.LayerNorm(self.fea_size)

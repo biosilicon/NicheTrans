@@ -32,7 +32,13 @@ source_dimension, target_dimension = dataset.rna_length, dataset.msi_length
 print(f"source_dim={source_dimension}, target_dim={target_dimension}")
 
 model = NicheTrans(source_length=source_dimension, target_length=target_dimension,
-                   noise_rate=args.noise_rate, dropout_rate=args.dropout_rate)
+                   noise_rate=args.noise_rate,
+                   dropout_rate=args.dropout_rate,
+                   use_moe_ffn=args.use_moe_ffn,
+                   num_experts=args.num_experts,
+                   moe_gate_hidden_dim=args.moe_gate_hidden_dim,
+                   moe_gate_type=args.moe_gate_type,
+                   ffn_mult=args.ffn_mult)
 model = model.to(device)
 state_dict = torch.load('NicheTrans_SMA_last.pth', map_location=device)
 model.load_state_dict(state_dict)
