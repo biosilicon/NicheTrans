@@ -8,8 +8,8 @@ def generate_args():
     parser.add_argument('--dropout_rate', default=0.1, type=float)
     parser.add_argument('--use_moe_ffn', default=True,
                         type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
-    parser.add_argument('--num_experts', default=4, type=int)
-    parser.add_argument('--moe_gate_hidden_dim', default=128, type=int)
+    parser.add_argument('--num_experts', default=8, type=int)
+    parser.add_argument('--moe_gate_hidden_dim', default=256, type=int)
     parser.add_argument('--moe_gate_type', default='softmax', type=str)
     parser.add_argument('--ffn_mult', default=2, type=int)
 
@@ -21,7 +21,7 @@ def generate_args():
     parser.add_argument('--adata_path', default='/mnt/datadisk0/Processed_DATA/2024_nm_human_lymph_nodes/', type=str)
 
     # Training options
-    parser.add_argument('--max-epoch', default=10, type=int,
+    parser.add_argument('--max-epoch', default=20, type=int,
                         help="maximum epochs to run")
     parser.add_argument('--stepsize', default=10, type=int,
                         help="stepsize to decay learning rate (>0 means this is enabled)")
