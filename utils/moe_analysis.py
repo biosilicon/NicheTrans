@@ -165,6 +165,7 @@ def resolve_sample_metadata(
 def default_batch_adapter(
     batch: Sequence[Any],
     include_cell_information: bool = False,
+    include_images: bool = False,
 ) -> dict[str, Any]:
     """Convert a dataloader batch into model inputs plus center-spot metadata."""
     if len(batch) == 4:
@@ -176,7 +177,7 @@ def default_batch_adapter(
 
     if len(batch) == 6 and torch.is_tensor(batch[0]) and batch[0].ndim == 4:
         return {
-            "model_args": (batch[1], batch[3]),
+            "model_args": (batch[0], batch[1], batch[3]) if include_images else (batch[1], batch[3]),
             "sample_ids": batch[5],
             "targets": batch[2],
         }
@@ -206,6 +207,7 @@ def collect_moe_activations(
     batch_adapter: Callable[[Sequence[Any]], dict[str, Any]] | None = None,
     sample_metadata_resolver: Callable[[str], Any] | Mapping[str, Any] | None = None,
     include_cell_information: bool = False,
+    include_images: bool = False,
     include_predictions: bool = True,
     include_targets: bool = False,
     max_batches: int | None = None,
@@ -219,6 +221,7 @@ def collect_moe_activations(
         batch_adapter = lambda batch: default_batch_adapter(
             batch,
             include_cell_information=include_cell_information,
+            include_images=include_images,
         )
 
     if device is None:
@@ -519,6 +522,7 @@ def analyze_moe_routing(
     batch_adapter: Callable[[Sequence[Any]], dict[str, Any]] | None = None,
     sample_metadata_resolver: Callable[[str], Any] | Mapping[str, Any] | None = None,
     include_cell_information: bool = False,
+    include_images: bool = False,
     include_predictions: bool = True,
     include_targets: bool = False,
     max_batches: int | None = None,
@@ -532,6 +536,7 @@ def analyze_moe_routing(
         batch_adapter=batch_adapter,
         sample_metadata_resolver=sample_metadata_resolver,
         include_cell_information=include_cell_information,
+        include_images=include_images,
         include_predictions=include_predictions,
         include_targets=include_targets,
         max_batches=max_batches,
