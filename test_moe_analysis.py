@@ -1,12 +1,18 @@
 import math
+import tempfile
 import unittest
+import warnings
 
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, Dataset
 
 from model.nicheTrans import NicheTrans
-from utils.moe_analysis import analyze_moe_routing, compute_expert_usage_metrics
+from utils.moe_analysis import (
+    analyze_moe_routing,
+    compute_expert_usage_metrics,
+    save_moe_analysis_tables,
+)
 
 
 class TinySpatialDataset(Dataset):
@@ -158,6 +164,80 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 0.7, places=6)
         model.ffn_omic.set_current_epoch(11)
         self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 0.5, places=6)
+
+    def test_stacked_moe_layers_aggregate_metrics_and_load_legacy_checkpoint(self):
+        torch.manual_seed(2)
+        legacy_model = NicheTrans(
+            source_length=6,
+            target_length=3,
+            noise_rate=0.0,
+            dropout_rate=0.0,
+            num_experts=3,
+            moe_gate_hidden_dim=8,
+            moe_router_temperature_enable=True,
+            moe_balance_loss_enable=True,
+            moe_router_entropy_penalty_enable=True,
+        )
+        legacy_state = legacy_model.state_dict()
+
+        stacked_model = NicheTrans(
+            source_length=6,
+            target_length=3,
+            noise_rate=0.0,
+            dropout_rate=0.0,
+            num_experts=3,
+            moe_gate_hidden_dim=8,
+            moe_num_layers=2,
+            moe_router_temperature_enable=True,
+            moe_balance_loss_enable=True,
+            moe_router_entropy_penalty_enable=True,
+        )
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            stacked_model.load_state_dict(legacy_state)
+
+        stacked_model.set_current_epoch(11)
+        self.assertAlmostEqual(stacked_model.ffn_omic.gate.get_router_temperature(), 0.5, places=6)
+        self.assertAlmostEqual(stacked_model.extra_ffn_omic[0].gate.get_router_temperature(), 0.5, places=6)
+
+        source = torch.randn(4, 6)
+        neighbors = torch.randn(4, 8, 6)
+        analysis_output = stacked_model(source, neighbors, return_moe_info=True)
+        moe_info = analysis_output["moe_info"]
+
+        self.assertEqual(moe_info["moe_num_layers"], 2)
+        self.assertEqual(len(moe_info["layer_routing_info"]), 2)
+
+        layer_aux = sum(info["moe_aux_loss"] for info in moe_info["layer_routing_info"])
+        self.assertTrue(torch.allclose(moe_info["moe_aux_loss"], layer_aux, atol=1e-6))
+
+        loader = DataLoader(TinySpatialDataset(), batch_size=2, shuffle=False)
+        results = analyze_moe_routing(
+            model=stacked_model,
+            dataloader=loader,
+            device=torch.device("cpu"),
+            include_predictions=False,
+            include_targets=True,
+            add_spatial_regions=True,
+        )
+
+        self.assertEqual(sorted(results["layer_activation_frames"]), ["layer_0", "layer_1"])
+        self.assertEqual(sorted(results["layer_results"]), ["layer_0", "layer_1"])
+        self.assertEqual(len(results["layer_overall_summary"]), 2)
+        self.assertEqual(int(results["overall"]["moe_layer_index"]), 1)
+        self.assertEqual(
+            results["layer_overall_summary"]["moe_layer_index"].tolist(),
+            [0, 1],
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            saved_paths = save_moe_analysis_tables(results, tmpdir, prefix="stacked")
+
+        self.assertIn("layer_overall_summary", saved_paths)
+        self.assertIn("layer_0_activation_frame", saved_paths)
+        self.assertIn("layer_1_activation_frame", saved_paths)
+        self.assertIn("layer_0_overall", saved_paths)
+        self.assertIn("layer_1_overall", saved_paths)
 
 
 if __name__ == "__main__":

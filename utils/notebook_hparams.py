@@ -12,6 +12,7 @@ MODEL_HPARAM_KEYS = (
     "moe_gate_hidden_dim",
     "moe_gate_type",
     "ffn_mult",
+    "moe_num_layers",
     "moe_router_temperature_enable",
     "moe_router_temperature_start",
     "moe_router_temperature_mid",

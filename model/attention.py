@@ -1,5 +1,6 @@
 import math
 import warnings
+from collections.abc import Mapping
 import torch
 import torch.nn.functional as F
 from einops import rearrange
@@ -167,6 +168,244 @@ def build_moe_output(predictions, routing_info, center_token_index=0):
         "center_gate_margin": compute_gate_margin(center_gate_weights),
     }
     return {"predictions": predictions, "moe_info": moe_info}
+
+
+def _routing_metric_as_tensor(routing_info, key):
+    value = routing_info.get(key)
+    if value is None:
+        return None
+    if torch.is_tensor(value):
+        return value
+
+    reference = routing_info.get("router_temperature")
+    if not torch.is_tensor(reference):
+        reference = routing_info.get("gate_weights")
+
+    if torch.is_tensor(reference):
+        return reference.new_tensor(float(value))
+    return torch.tensor(float(value))
+
+
+def aggregate_moe_routing_info(routing_infos):
+    valid_infos = [info for info in routing_infos if isinstance(info, Mapping)]
+    if not valid_infos:
+        return None
+
+    primary_info = dict(valid_infos[-1])
+    primary_info["moe_num_layers"] = len(valid_infos)
+    primary_info["layer_routing_info"] = list(valid_infos)
+
+    sum_keys = ("moe_aux_loss",)
+    mean_keys = (
+        "router_temperature",
+        "balance_loss",
+        "router_entropy_penalty",
+        "mean_gate_margin",
+        "std_gate_margin",
+        "expert_output_cosine_mean",
+        "expert_output_cosine_std",
+    )
+
+    for key in sum_keys:
+        tensors = [
+            value
+            for value in (_routing_metric_as_tensor(info, key) for info in valid_infos)
+            if value is not None
+        ]
+        if tensors:
+            primary_info[key] = torch.stack(tensors, dim=0).sum(dim=0)
+
+    for key in mean_keys:
+        tensors = [
+            value
+            for value in (_routing_metric_as_tensor(info, key) for info in valid_infos)
+            if value is not None
+        ]
+        if tensors:
+            primary_info[key] = torch.stack(tensors, dim=0).mean(dim=0)
+
+    return primary_info
+
+
+def build_omic_block_stack(
+    dim,
+    dropout,
+    mult,
+    num_layers,
+    num_experts,
+    gate_hidden_dim,
+    use_moe,
+    gate_type,
+    router_temperature_enable,
+    router_temperature_start,
+    router_temperature_mid,
+    router_temperature_end,
+    router_temperature_schedule,
+    balance_loss_enable,
+    balance_loss_weight,
+    balance_loss_type,
+    router_entropy_penalty_enable,
+    router_entropy_penalty_weight,
+    heads=4,
+    dim_head=64,
+):
+    def build_single_block():
+        return (
+            Self_Attention(
+                query_dim=dim,
+                context_dim=dim,
+                heads=heads,
+                dim_head=dim_head,
+                dropout=dropout,
+            ),
+            FeedForward(
+                dim=dim,
+                mult=mult,
+                dropout=dropout,
+                num_experts=num_experts,
+                gate_hidden_dim=gate_hidden_dim,
+                use_moe=use_moe,
+                gate_type=gate_type,
+                router_temperature_enable=router_temperature_enable,
+                router_temperature_start=router_temperature_start,
+                router_temperature_mid=router_temperature_mid,
+                router_temperature_end=router_temperature_end,
+                router_temperature_schedule=router_temperature_schedule,
+                balance_loss_enable=balance_loss_enable,
+                balance_loss_weight=balance_loss_weight,
+                balance_loss_type=balance_loss_type,
+                router_entropy_penalty_enable=router_entropy_penalty_enable,
+                router_entropy_penalty_weight=router_entropy_penalty_weight,
+            ),
+            nn.LayerNorm(dim),
+            nn.LayerNorm(dim),
+        )
+
+    total_layers = max(int(num_layers), 1)
+    fusion_omic, ffn_omic, ln1, ln2 = build_single_block()
+    extra_fusion_omic = nn.ModuleList()
+    extra_ffn_omic = nn.ModuleList()
+    extra_ln1 = nn.ModuleList()
+    extra_ln2 = nn.ModuleList()
+
+    for _ in range(total_layers - 1):
+        block_fusion, block_ffn, block_ln1, block_ln2 = build_single_block()
+        extra_fusion_omic.append(block_fusion)
+        extra_ffn_omic.append(block_ffn)
+        extra_ln1.append(block_ln1)
+        extra_ln2.append(block_ln2)
+
+    return (
+        fusion_omic,
+        ffn_omic,
+        ln1,
+        ln2,
+        extra_fusion_omic,
+        extra_ffn_omic,
+        extra_ln1,
+        extra_ln2,
+    )
+
+
+class StackedMoEModelMixin:
+    _OMIC_EXTRA_MODULE_NAMES = (
+        "extra_fusion_omic",
+        "extra_ffn_omic",
+        "extra_ln1",
+        "extra_ln2",
+    )
+
+    def iter_omic_block_modules(self):
+        yield self.fusion_omic, self.ffn_omic, self.ln1, self.ln2
+
+        extra_fusion_omic = getattr(self, "extra_fusion_omic", [])
+        extra_ffn_omic = getattr(self, "extra_ffn_omic", [])
+        extra_ln1 = getattr(self, "extra_ln1", [])
+        extra_ln2 = getattr(self, "extra_ln2", [])
+
+        for block_index in range(len(extra_ffn_omic)):
+            yield (
+                extra_fusion_omic[block_index],
+                extra_ffn_omic[block_index],
+                extra_ln1[block_index],
+                extra_ln2[block_index],
+            )
+
+    def run_omic_blocks(self, f_omic, return_moe_info=False):
+        routing_infos = [] if return_moe_info else None
+
+        for fusion_omic, ffn_omic, ln1, ln2 in self.iter_omic_block_modules():
+            f_omic = fusion_omic(ln1(f_omic)) + f_omic
+            if return_moe_info:
+                ffn_out, routing_info = ffn_omic(ln2(f_omic), return_routing=True)
+                routing_infos.append(routing_info)
+            else:
+                ffn_out = ffn_omic(ln2(f_omic))
+            f_omic = ffn_out + f_omic
+
+        routing_info = aggregate_moe_routing_info(routing_infos) if return_moe_info else None
+        return f_omic, routing_info
+
+    def set_current_epoch(self, epoch):
+        self.current_epoch = max(int(epoch), 1)
+        for _, ffn_omic, _, _ in self.iter_omic_block_modules():
+            if hasattr(ffn_omic, "set_current_epoch"):
+                ffn_omic.set_current_epoch(self.current_epoch)
+
+    def _prepare_legacy_omic_stack_state_dict(self, state_dict, prefix):
+        extra_prefixes = tuple(f"{prefix}{name}." for name in self._OMIC_EXTRA_MODULE_NAMES)
+        has_extra_blocks = len(getattr(self, "extra_ffn_omic", [])) > 0
+
+        if not has_extra_blocks:
+            removable_keys = [key for key in state_dict.keys() if key.startswith(extra_prefixes)]
+            for key in removable_keys:
+                state_dict.pop(key)
+            if removable_keys:
+                warnings.warn(
+                    "Loading a stacked omic-block checkpoint into a single-block model. "
+                    "Additional omic blocks are ignored.",
+                    RuntimeWarning
+                )
+            return
+
+        missing_extra_keys = []
+        for module_name in self._OMIC_EXTRA_MODULE_NAMES:
+            module = getattr(self, module_name, None)
+            if module is None:
+                continue
+            for key, value in module.state_dict().items():
+                full_key = f"{prefix}{module_name}.{key}"
+                if full_key not in state_dict:
+                    state_dict[full_key] = value.detach().clone()
+                    missing_extra_keys.append(full_key)
+
+        if missing_extra_keys:
+            warnings.warn(
+                "Loading a single-block checkpoint into a stacked omic-block model. "
+                "Additional omic blocks keep their current initialization.",
+                RuntimeWarning
+            )
+
+    def _load_from_state_dict(
+        self,
+        state_dict,
+        prefix,
+        local_metadata,
+        strict,
+        missing_keys,
+        unexpected_keys,
+        error_msgs
+    ):
+        self._prepare_legacy_omic_stack_state_dict(state_dict, prefix)
+        super()._load_from_state_dict(
+            state_dict,
+            prefix,
+            local_metadata,
+            strict,
+            missing_keys,
+            unexpected_keys,
+            error_msgs
+        )
 
 
 class FeedForward(nn.Module):

@@ -37,9 +37,27 @@ def _expert_columns(frame: pd.DataFrame) -> list[str]:
     )
 
 
+def _layer_sort_key(name: Any) -> tuple[int, str]:
+    text = str(name)
+    match = re.search(r"(\d+)$", text)
+    if match:
+        return int(match.group(1)), text
+    return math.inf, text
+
+
 def _soft_entropy(probabilities: np.ndarray, eps: float = 1e-12) -> np.ndarray:
     clipped = np.clip(probabilities, eps, 1.0)
     return -(clipped * np.log(clipped)).sum(axis=-1)
+
+
+def _gate_margin_from_probabilities(probabilities: np.ndarray) -> np.ndarray:
+    num_experts = probabilities.shape[-1]
+    if num_experts <= 1:
+        return np.zeros(probabilities.shape[0], dtype=float)
+    if num_experts == 2:
+        return np.abs(probabilities[:, 0] - probabilities[:, 1])
+    top2 = np.sort(probabilities, axis=1)[:, -2:]
+    return top2[:, 1] - top2[:, 0]
 
 
 def _normalised_entropy(probabilities: np.ndarray) -> float:
@@ -223,7 +241,72 @@ def default_batch_adapter(
     )
 
 
-def collect_moe_activations(
+def _layer_routing_infos(moe_info: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    layer_infos = moe_info.get("layer_routing_info")
+    if isinstance(layer_infos, Sequence):
+        valid_infos = [info for info in layer_infos if isinstance(info, Mapping)]
+        if valid_infos:
+            return valid_infos
+    return [moe_info]
+
+
+def _center_routing_arrays(
+    routing_info: Mapping[str, Any],
+    center_token_index: int = 0,
+) -> dict[str, np.ndarray]:
+    gate_weights = _to_numpy(routing_info["gate_weights"])
+    if gate_weights.ndim >= 3:
+        center_gate_weights = gate_weights[:, center_token_index, :]
+    else:
+        center_gate_weights = gate_weights
+
+    return {
+        "center_gate_weights": center_gate_weights,
+        "center_entropy": _soft_entropy(center_gate_weights),
+        "center_top1_expert": center_gate_weights.argmax(axis=-1).astype(int),
+        "center_gate_margin": _gate_margin_from_probabilities(center_gate_weights),
+    }
+
+
+def _shared_routing_record_fields(
+    routing_info: Mapping[str, Any],
+    layer_index: int,
+    num_layers: int,
+) -> dict[str, float]:
+    shared_fields = {
+        "moe_layer_index": int(layer_index),
+        "moe_num_layers": int(num_layers),
+    }
+    for key in (
+        "router_temperature",
+        "balance_loss",
+        "router_entropy_penalty",
+        "moe_aux_loss",
+        "mean_gate_margin",
+        "std_gate_margin",
+        "expert_output_cosine_mean",
+        "expert_output_cosine_std",
+    ):
+        if key in routing_info:
+            shared_fields[key] = float(_to_numpy(routing_info[key]))
+    return shared_fields
+
+
+def _records_to_frame(records: list[dict[str, Any]], model_class_name: str) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+
+    frame = pd.DataFrame.from_records(records)
+    expert_columns = _expert_columns(frame)
+    sort_columns = [column for column in ("moe_layer_index", "slice_id", "y", "x", "sample_id") if column in frame.columns]
+    if sort_columns:
+        frame = frame.sort_values(sort_columns).reset_index(drop=True)
+    frame.attrs["num_experts"] = len(expert_columns)
+    frame.attrs["model_class"] = model_class_name
+    return frame
+
+
+def _collect_moe_activation_frames(
     model: Any,
     dataloader: Any,
     device: torch.device | None = None,
@@ -234,12 +317,8 @@ def collect_moe_activations(
     include_predictions: bool = True,
     include_targets: bool = False,
     max_batches: int | None = None,
-) -> pd.DataFrame:
-    """Run one forward pass over a loader and collect center-spot expert weights.
-
-    The returned dataframe is the main analysis table. Each row is one center spot,
-    with one `expert_i` column per expert plus optional prediction/target columns.
-    """
+    include_layerwise: bool = False,
+) -> tuple[pd.DataFrame, dict[str, pd.DataFrame]]:
     if batch_adapter is None:
         batch_adapter = lambda batch: default_batch_adapter(
             batch,
@@ -253,7 +332,8 @@ def collect_moe_activations(
     was_training = model.training
     model.eval()
 
-    records: list[dict[str, Any]] = []
+    final_records: list[dict[str, Any]] = []
+    layer_records: dict[int, list[dict[str, Any]]] = {}
     unwrapped = unwrap_model(model)
 
     with torch.no_grad():
@@ -275,22 +355,8 @@ def collect_moe_activations(
 
             predictions = outputs["predictions"]
             moe_info = outputs["moe_info"]
-            center_gate_weights = _to_numpy(moe_info["center_gate_weights"])
-            center_entropy = _to_numpy(moe_info["center_entropy"])
-            center_top1 = _to_numpy(moe_info["center_top1_expert"]).astype(int)
-            center_gate_margin = _to_numpy(
-                moe_info.get("center_gate_margin", np.zeros(center_gate_weights.shape[0], dtype=float))
-            )
-            shared_record_fields = {}
-            for key in (
-                "router_temperature",
-                "balance_loss",
-                "router_entropy_penalty",
-                "expert_output_cosine_mean",
-                "expert_output_cosine_std",
-            ):
-                if key in moe_info:
-                    shared_record_fields[key] = float(_to_numpy(moe_info[key]))
+            layer_infos = _layer_routing_infos(moe_info)
+            final_layer_index = len(layer_infos) - 1
 
             if include_predictions:
                 predictions_np = _to_numpy(predictions)
@@ -298,59 +364,142 @@ def collect_moe_activations(
                 predictions_np = None
 
             if include_targets and adapted.get("targets") is not None:
-                targets = adapted["targets"]
-                targets_np = _to_numpy(targets)
+                targets_np = _to_numpy(adapted["targets"])
             else:
                 targets_np = None
 
             sample_ids = [str(sample_id) for sample_id in adapted["sample_ids"]]
 
-            for row_index, sample_id in enumerate(sample_ids):
-                metadata = resolve_sample_metadata(
-                    sample_id,
-                    sample_metadata_resolver=sample_metadata_resolver,
+            def append_records(
+                target_records: list[dict[str, Any]],
+                routing_info: Mapping[str, Any],
+                layer_index: int,
+            ) -> None:
+                center_arrays = _center_routing_arrays(routing_info)
+                center_gate_weights = center_arrays["center_gate_weights"]
+                center_entropy = center_arrays["center_entropy"]
+                center_top1 = center_arrays["center_top1_expert"]
+                center_gate_margin = center_arrays["center_gate_margin"]
+                shared_record_fields = _shared_routing_record_fields(
+                    routing_info,
+                    layer_index=layer_index,
+                    num_layers=len(layer_infos),
                 )
-                record = {
-                    **metadata,
-                    "batch_index": batch_index,
-                    "batch_spot_index": row_index,
-                    "top1_expert": int(center_top1[row_index]),
-                    "top1_weight": float(center_gate_weights[row_index].max()),
-                    "center_entropy": float(center_entropy[row_index]),
-                    "gate_margin": float(center_gate_margin[row_index]),
-                    "effective_expert_count_per_spot": float(
-                        math.exp(float(center_entropy[row_index]))
-                    ),
-                    **shared_record_fields,
-                }
 
-                for expert_index, weight in enumerate(center_gate_weights[row_index]):
-                    record[f"expert_{expert_index}"] = float(weight)
+                for row_index, sample_id in enumerate(sample_ids):
+                    metadata = resolve_sample_metadata(
+                        sample_id,
+                        sample_metadata_resolver=sample_metadata_resolver,
+                    )
+                    record = {
+                        **metadata,
+                        "batch_index": batch_index,
+                        "batch_spot_index": row_index,
+                        "top1_expert": int(center_top1[row_index]),
+                        "top1_weight": float(center_gate_weights[row_index].max()),
+                        "center_entropy": float(center_entropy[row_index]),
+                        "gate_margin": float(center_gate_margin[row_index]),
+                        "effective_expert_count_per_spot": float(
+                            math.exp(float(center_entropy[row_index]))
+                        ),
+                        **shared_record_fields,
+                    }
 
-                if predictions_np is not None:
-                    for output_index, value in enumerate(np.atleast_1d(predictions_np[row_index])):
-                        record[f"prediction_{output_index}"] = float(value)
+                    for expert_index, weight in enumerate(center_gate_weights[row_index]):
+                        record[f"expert_{expert_index}"] = float(weight)
 
-                if targets_np is not None:
-                    for output_index, value in enumerate(np.atleast_1d(targets_np[row_index])):
-                        record[f"target_{output_index}"] = float(value)
+                    if predictions_np is not None:
+                        for output_index, value in enumerate(np.atleast_1d(predictions_np[row_index])):
+                            record[f"prediction_{output_index}"] = float(value)
 
-                records.append(record)
+                    if targets_np is not None:
+                        for output_index, value in enumerate(np.atleast_1d(targets_np[row_index])):
+                            record[f"target_{output_index}"] = float(value)
+
+                    target_records.append(record)
+
+            append_records(final_records, layer_infos[final_layer_index], final_layer_index)
+
+            if include_layerwise:
+                for layer_index, layer_info in enumerate(layer_infos):
+                    layer_records.setdefault(layer_index, [])
+                    append_records(layer_records[layer_index], layer_info, layer_index)
 
     if was_training:
         model.train()
 
-    if not records:
-        return pd.DataFrame()
+    activation_frame = _records_to_frame(final_records, unwrapped.__class__.__name__)
+    layer_activation_frames = {
+        f"layer_{layer_index}": _records_to_frame(records, unwrapped.__class__.__name__)
+        for layer_index, records in sorted(layer_records.items())
+    }
+    return activation_frame, layer_activation_frames
 
-    frame = pd.DataFrame.from_records(records)
-    expert_columns = _expert_columns(frame)
-    sort_columns = [column for column in ("slice_id", "y", "x", "sample_id") if column in frame.columns]
-    if sort_columns:
-        frame = frame.sort_values(sort_columns).reset_index(drop=True)
-    frame.attrs["num_experts"] = len(expert_columns)
-    frame.attrs["model_class"] = unwrapped.__class__.__name__
-    return frame
+
+def collect_moe_activations(
+    model: Any,
+    dataloader: Any,
+    device: torch.device | None = None,
+    batch_adapter: Callable[[Sequence[Any]], dict[str, Any]] | None = None,
+    sample_metadata_resolver: Callable[[str], Any] | Mapping[str, Any] | None = None,
+    include_cell_information: bool = False,
+    include_images: bool = False,
+    include_predictions: bool = True,
+    include_targets: bool = False,
+    max_batches: int | None = None,
+) -> pd.DataFrame:
+    """Run one forward pass over a loader and collect center-spot expert weights.
+
+    The returned dataframe is the main analysis table. Each row is one center spot,
+    with one `expert_i` column per expert plus optional prediction/target columns.
+    """
+    activation_frame, _ = _collect_moe_activation_frames(
+        model=model,
+        dataloader=dataloader,
+        device=device,
+        batch_adapter=batch_adapter,
+        sample_metadata_resolver=sample_metadata_resolver,
+        include_cell_information=include_cell_information,
+        include_images=include_images,
+        include_predictions=include_predictions,
+        include_targets=include_targets,
+        max_batches=max_batches,
+        include_layerwise=False,
+    )
+    return activation_frame
+
+
+def collect_layerwise_moe_activations(
+    model: Any,
+    dataloader: Any,
+    device: torch.device | None = None,
+    batch_adapter: Callable[[Sequence[Any]], dict[str, Any]] | None = None,
+    sample_metadata_resolver: Callable[[str], Any] | Mapping[str, Any] | None = None,
+    include_cell_information: bool = False,
+    include_images: bool = False,
+    include_predictions: bool = True,
+    include_targets: bool = False,
+    max_batches: int | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Collect one activation dataframe per MoE layer.
+
+    The returned mapping uses keys like `layer_0`, `layer_1`, ... and keeps the
+    same per-spot schema as `collect_moe_activations(...)`.
+    """
+    _, layer_activation_frames = _collect_moe_activation_frames(
+        model=model,
+        dataloader=dataloader,
+        device=device,
+        batch_adapter=batch_adapter,
+        sample_metadata_resolver=sample_metadata_resolver,
+        include_cell_information=include_cell_information,
+        include_images=include_images,
+        include_predictions=include_predictions,
+        include_targets=include_targets,
+        max_batches=max_batches,
+        include_layerwise=True,
+    )
+    return layer_activation_frames
 
 
 def compute_grouped_usage_metrics(
@@ -507,6 +656,7 @@ def compute_expert_usage_metrics(
     """Compute overall, batch-level, slice-level, and region-level MoE metrics."""
     if activation_frame.empty:
         return {
+            "activation_frame": activation_frame.copy(),
             "overall": {},
             "expert_summary": pd.DataFrame(),
             "batch_summary": pd.DataFrame(),
@@ -564,6 +714,9 @@ def compute_expert_usage_metrics(
     ):
         if column in output_frame.columns:
             overall[column] = float(output_frame[column].mean())
+    for column in ("moe_layer_index", "moe_num_layers"):
+        if column in output_frame.columns and not output_frame.empty:
+            overall[column] = int(output_frame[column].iloc[0])
 
     return {
         "activation_frame": output_frame,
@@ -574,6 +727,51 @@ def compute_expert_usage_metrics(
         "region_summary": region_summary,
         "slice_differences": slice_differences,
         "region_differences": region_differences,
+    }
+
+
+def compute_layerwise_expert_usage_metrics(
+    layer_activation_frames: Mapping[str, pd.DataFrame],
+    add_spatial_regions: bool = True,
+    spatial_region_bins: int = 2,
+) -> dict[str, Any]:
+    """Compute expert-usage summaries for every MoE layer independently."""
+    layer_results: dict[str, dict[str, Any]] = {}
+    summary_records: list[dict[str, Any]] = []
+
+    for layer_name in sorted(layer_activation_frames, key=_layer_sort_key):
+        layer_frame = layer_activation_frames[layer_name]
+        metrics = compute_expert_usage_metrics(
+            activation_frame=layer_frame,
+            add_spatial_regions=add_spatial_regions,
+            spatial_region_bins=spatial_region_bins,
+        )
+        layer_results[layer_name] = metrics
+
+        summary_record = {"layer_name": layer_name}
+        summary_record.update(metrics.get("overall", {}))
+        if isinstance(layer_frame, pd.DataFrame) and not layer_frame.empty:
+            if "moe_layer_index" in layer_frame.columns:
+                summary_record["moe_layer_index"] = int(layer_frame["moe_layer_index"].iloc[0])
+            if "moe_num_layers" in layer_frame.columns:
+                summary_record["moe_num_layers"] = int(layer_frame["moe_num_layers"].iloc[0])
+        summary_records.append(summary_record)
+
+    layer_overall_summary = pd.DataFrame.from_records(summary_records)
+    if not layer_overall_summary.empty:
+        sort_columns = [
+            column
+            for column in ("moe_layer_index", "layer_name")
+            if column in layer_overall_summary.columns
+        ]
+        if sort_columns:
+            layer_overall_summary = (
+                layer_overall_summary.sort_values(sort_columns).reset_index(drop=True)
+            )
+
+    return {
+        "layer_results": layer_results,
+        "layer_overall_summary": layer_overall_summary,
     }
 
 
@@ -591,7 +789,7 @@ def analyze_moe_routing(
     add_spatial_regions: bool = True,
     spatial_region_bins: int = 2,
 ) -> dict[str, Any]:
-    activation_frame = collect_moe_activations(
+    activation_frame, layer_activation_frames = _collect_moe_activation_frames(
         model=model,
         dataloader=dataloader,
         device=device,
@@ -602,12 +800,21 @@ def analyze_moe_routing(
         include_predictions=include_predictions,
         include_targets=include_targets,
         max_batches=max_batches,
+        include_layerwise=True,
     )
-    return compute_expert_usage_metrics(
+    analysis_results = compute_expert_usage_metrics(
         activation_frame=activation_frame,
         add_spatial_regions=add_spatial_regions,
         spatial_region_bins=spatial_region_bins,
     )
+    layerwise_results = compute_layerwise_expert_usage_metrics(
+        layer_activation_frames=layer_activation_frames,
+        add_spatial_regions=add_spatial_regions,
+        spatial_region_bins=spatial_region_bins,
+    )
+    analysis_results["layer_activation_frames"] = layer_activation_frames
+    analysis_results.update(layerwise_results)
+    return analysis_results
 
 
 def summarize_epoch_trajectory(epoch_activation_frames: Mapping[Any, pd.DataFrame]) -> pd.DataFrame:
@@ -776,6 +983,22 @@ def save_moe_analysis_tables(
     output_path.mkdir(parents=True, exist_ok=True)
 
     saved_paths: dict[str, Path] = {}
+    table_keys = (
+        "activation_frame",
+        "expert_summary",
+        "batch_summary",
+        "slice_summary",
+        "region_summary",
+        "slice_differences",
+        "region_differences",
+    )
+
+    def save_frame(path_key: str, file_name: str, value: Any) -> None:
+        if isinstance(value, pd.DataFrame) and not value.empty:
+            path = output_path / file_name
+            value.to_csv(path, index=False)
+            saved_paths[path_key] = path
+
     for key in (
         "activation_frame",
         "expert_summary",
@@ -785,16 +1008,50 @@ def save_moe_analysis_tables(
         "slice_differences",
         "region_differences",
     ):
-        value = analysis_results.get(key)
-        if isinstance(value, pd.DataFrame) and not value.empty:
-            path = output_path / f"{prefix}_{key}.csv"
-            value.to_csv(path, index=False)
-            saved_paths[key] = path
+        save_frame(key, f"{prefix}_{key}.csv", analysis_results.get(key))
 
     overall = analysis_results.get("overall")
     if overall:
         path = output_path / f"{prefix}_overall_metrics.json"
         pd.Series(overall).to_json(path, indent=2)
         saved_paths["overall"] = path
+
+    save_frame(
+        "layer_overall_summary",
+        f"{prefix}_layer_overall_summary.csv",
+        analysis_results.get("layer_overall_summary"),
+    )
+
+    layer_results = analysis_results.get("layer_results")
+    saved_layer_activation = set()
+    if isinstance(layer_results, Mapping):
+        for layer_name in sorted(layer_results, key=_layer_sort_key):
+            layer_metrics = layer_results.get(layer_name)
+            if not isinstance(layer_metrics, Mapping):
+                continue
+
+            for key in table_keys:
+                value = layer_metrics.get(key)
+                path_key = f"{layer_name}_{key}"
+                save_frame(path_key, f"{prefix}_{layer_name}_{key}.csv", value)
+                if key == "activation_frame" and path_key in saved_paths:
+                    saved_layer_activation.add(layer_name)
+
+            layer_overall = layer_metrics.get("overall")
+            if layer_overall:
+                path = output_path / f"{prefix}_{layer_name}_overall_metrics.json"
+                pd.Series(layer_overall).to_json(path, indent=2)
+                saved_paths[f"{layer_name}_overall"] = path
+
+    layer_activation_frames = analysis_results.get("layer_activation_frames")
+    if isinstance(layer_activation_frames, Mapping):
+        for layer_name in sorted(layer_activation_frames, key=_layer_sort_key):
+            if layer_name in saved_layer_activation:
+                continue
+            save_frame(
+                f"{layer_name}_activation_frame",
+                f"{prefix}_{layer_name}_activation_frame.csv",
+                layer_activation_frames.get(layer_name),
+            )
 
     return saved_paths

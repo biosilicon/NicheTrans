@@ -12,6 +12,7 @@ def generate_args():
     parser.add_argument('--moe_gate_hidden_dim', default=256, type=int)
     parser.add_argument('--moe_gate_type', default='softmax', type=str)
     parser.add_argument('--ffn_mult', default=4, type=int)
+    parser.add_argument('--moe_num_layers', default=1, type=int)
     parser.add_argument('--moe_router_temperature_enable', default=True,
                         type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
     parser.add_argument('--moe_router_temperature_start', default=1.0, type=float)

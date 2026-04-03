@@ -38,7 +38,8 @@ model = NicheTrans(source_length=source_dimension, target_length=target_dimensio
                    num_experts=args.num_experts,
                    moe_gate_hidden_dim=args.moe_gate_hidden_dim,
                    moe_gate_type=args.moe_gate_type,
-                   ffn_mult=args.ffn_mult)
+                   ffn_mult=args.ffn_mult,
+                   moe_num_layers=getattr(args, "moe_num_layers", 1))
 model = model.to(device)
 state_dict = torch.load('NicheTrans_SMA_last.pth', map_location=device)
 model.load_state_dict(state_dict)

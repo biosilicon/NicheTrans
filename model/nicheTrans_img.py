@@ -8,7 +8,7 @@ from model.attention import *
 from model.nicheTrans import *
 
 
-class NicheTrans_img(nn.Module):
+class NicheTrans_img(StackedMoEModelMixin, nn.Module):
     def __init__(
         self,
         source_length=877,
@@ -20,6 +20,7 @@ class NicheTrans_img(nn.Module):
         moe_gate_hidden_dim=None,
         moe_gate_type='softmax',
         ffn_mult=2,
+        moe_num_layers=1,
         moe_router_temperature_enable=False,
         moe_router_temperature_start=1.0,
         moe_router_temperature_mid=0.7,
@@ -40,6 +41,7 @@ class NicheTrans_img(nn.Module):
         self.moe_gate_hidden_dim = None if moe_gate_hidden_dim in (None, 0) else int(moe_gate_hidden_dim)
         self.moe_gate_type = moe_gate_type
         self.ffn_mult = int(ffn_mult)
+        self.moe_num_layers = max(int(moe_num_layers), 1)
 
         self.fea_size, self.img_size = 256, 128
 
@@ -58,11 +60,20 @@ class NicheTrans_img(nn.Module):
         # omics encoder
         self.encoder = NetBlock(nlayer=2, dim_list=[source_length, 512, self.fea_size], dropout_rate=self.dropout_rate, noise_rate=self.noise_rate)
 
-        self.fusion_omic = Self_Attention(query_dim=self.fea_size, context_dim=self.fea_size, heads=4, dim_head=64, dropout=self.dropout_rate)
-        self.ffn_omic = FeedForward(
+        (
+            self.fusion_omic,
+            self.ffn_omic,
+            self.ln1,
+            self.ln2,
+            self.extra_fusion_omic,
+            self.extra_ffn_omic,
+            self.extra_ln1,
+            self.extra_ln2,
+        ) = build_omic_block_stack(
             dim=self.fea_size,
-            mult=self.ffn_mult,
             dropout=self.dropout_rate,
+            mult=self.ffn_mult,
+            num_layers=self.moe_num_layers,
             num_experts=self.num_experts,
             gate_hidden_dim=self.moe_gate_hidden_dim,
             use_moe=self.use_moe_ffn,
@@ -78,9 +89,6 @@ class NicheTrans_img(nn.Module):
             router_entropy_penalty_enable=moe_router_entropy_penalty_enable,
             router_entropy_penalty_weight=moe_router_entropy_penalty_weight,
         )
-    
-        self.ln1 = nn.LayerNorm(self.fea_size)
-        self.ln2 = nn.LayerNorm(self.fea_size)
 
         ##############
         # prediction layers
@@ -129,13 +137,7 @@ class NicheTrans_img(nn.Module):
 
         f_omic = self.non_linear(f_omic)
 
-        f_omic = self.fusion_omic(self.ln1(f_omic)) + f_omic
-        if return_moe_info:
-            ffn_out, routing_info = self.ffn_omic(self.ln2(f_omic), return_routing=True)
-        else:
-            ffn_out = self.ffn_omic(self.ln2(f_omic))
-            routing_info = None
-        f_omic = ffn_out + f_omic
+        f_omic, routing_info = self.run_omic_blocks(f_omic, return_moe_info=return_moe_info)
         
         # image feature extraction
         f_img = self.pooling(self.base(img)).squeeze()

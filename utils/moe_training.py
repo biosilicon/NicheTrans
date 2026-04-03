@@ -24,6 +24,12 @@ def unwrap_model(model: Any) -> Any:
 
 def prepare_moe_epoch(model: Any, epoch: int | None = None) -> int:
     unwrapped = unwrap_model(model)
+    if hasattr(unwrapped, "set_current_epoch"):
+        if epoch is None:
+            epoch = getattr(unwrapped, "current_epoch", 0) + 1
+        unwrapped.set_current_epoch(epoch)
+        return int(epoch)
+
     ffn_module = getattr(unwrapped, "ffn_omic", None)
     if ffn_module is None or not hasattr(ffn_module, "set_current_epoch"):
         return 1

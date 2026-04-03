@@ -93,6 +93,23 @@ Example:
 ```bash
 python train_sweep.py --dataset sma --grid-file sweep.json
 ```
+
+## Multi-layer MoE Recommendations
+If you want stronger expert specialization instead of a soft ensemble effect, start with two MoE blocks (`moe_num_layers=2`) and keep the routing moderately sharp before scaling to more experts.
+
+Recommended starting presets:
+
+- `conservative_depth2`: `moe_num_layers=2`, `num_experts=4`, `moe_gate_hidden_dim=128`, `ffn_mult=2`, temperature `(1.0 -> 0.7 -> 0.5)`, `moe_balance_loss_weight=1e-3`, `moe_router_entropy_penalty_weight=5e-4`.
+- `balanced_depth2`: `moe_num_layers=2`, `num_experts=4`, `moe_gate_hidden_dim=256`, `ffn_mult=4`, temperature `(1.0 -> 0.7 -> 0.4)`, `moe_balance_loss_weight=2e-3`, `moe_router_entropy_penalty_weight=1e-3`.
+- `aggressive_specialization`: `moe_num_layers=2`, `num_experts=6`, `moe_gate_hidden_dim=256`, `ffn_mult=4`, temperature `(1.0 -> 0.6 -> 0.3)`, `moe_balance_loss_weight=2e-3`, `moe_router_entropy_penalty_weight=2e-3`.
+
+Practical notes:
+
+- Start with `balanced_depth2` unless the dataset is very small or training is unstable.
+- Increase `ffn_mult` before pushing `num_experts` too high; bigger experts often help more than many similar experts.
+- Keep `moe_balance_loss_enable=True` and `moe_router_entropy_penalty_enable=True` when you move from one MoE block to two.
+- Use `analyze_moe_routing(...)` to compare specialization by layer. The saved outputs now include `*_layer_overall_summary.csv` and one `*_layer_k_*` table group per MoE layer.
+
 ## Model attribution analysis
 Apart from the spatial cross-omics translation, we also provided guidelines for attribution analysis in 'Tutorial 3.3', 'Tutorial 6.5', and 'Tutorial 6.6'.
 
