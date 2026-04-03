@@ -191,7 +191,7 @@ class ATAC_RNA_Seq(object):
             X_scaled = scaler.fit_transform(X)
 
             k = 30
-            pca = PCA(n_components=k)
+            pca = PCA(n_components=k, random_state=42)
             X_pca = pca.fit_transform(X_scaled)
             dist = pairwise_distances(X_pca, metric="euclidean")
             k = 50
