@@ -19,7 +19,17 @@ class NicheTrans_img(nn.Module):
         num_experts=1,
         moe_gate_hidden_dim=None,
         moe_gate_type='softmax',
-        ffn_mult=2
+        ffn_mult=2,
+        moe_router_temperature_enable=False,
+        moe_router_temperature_start=1.0,
+        moe_router_temperature_mid=0.7,
+        moe_router_temperature_end=0.5,
+        moe_router_temperature_schedule="step",
+        moe_balance_loss_enable=False,
+        moe_balance_loss_weight=1e-3,
+        moe_balance_loss_type="mse_uniform",
+        moe_router_entropy_penalty_enable=False,
+        moe_router_entropy_penalty_weight=1e-3,
     ):
         super(NicheTrans_img, self).__init__()
 
@@ -56,7 +66,17 @@ class NicheTrans_img(nn.Module):
             num_experts=self.num_experts,
             gate_hidden_dim=self.moe_gate_hidden_dim,
             use_moe=self.use_moe_ffn,
-            gate_type=self.moe_gate_type
+            gate_type=self.moe_gate_type,
+            router_temperature_enable=moe_router_temperature_enable,
+            router_temperature_start=moe_router_temperature_start,
+            router_temperature_mid=moe_router_temperature_mid,
+            router_temperature_end=moe_router_temperature_end,
+            router_temperature_schedule=moe_router_temperature_schedule,
+            balance_loss_enable=moe_balance_loss_enable,
+            balance_loss_weight=moe_balance_loss_weight,
+            balance_loss_type=moe_balance_loss_type,
+            router_entropy_penalty_enable=moe_router_entropy_penalty_enable,
+            router_entropy_penalty_weight=moe_router_entropy_penalty_weight,
         )
     
         self.ln1 = nn.LayerNorm(self.fea_size)

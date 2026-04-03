@@ -12,6 +12,19 @@ def generate_args():
     parser.add_argument('--moe_gate_hidden_dim', default=0, type=int)
     parser.add_argument('--moe_gate_type', default='softmax', type=str)
     parser.add_argument('--ffn_mult', default=2, type=int)
+    parser.add_argument('--moe_router_temperature_enable', default=False,
+                        type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
+    parser.add_argument('--moe_router_temperature_start', default=1.0, type=float)
+    parser.add_argument('--moe_router_temperature_mid', default=0.7, type=float)
+    parser.add_argument('--moe_router_temperature_end', default=0.5, type=float)
+    parser.add_argument('--moe_router_temperature_schedule', default='step', type=str)
+    parser.add_argument('--moe_balance_loss_enable', default=False,
+                        type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
+    parser.add_argument('--moe_balance_loss_weight', default=1e-3, type=float)
+    parser.add_argument('--moe_balance_loss_type', default='mse_uniform', type=str)
+    parser.add_argument('--moe_router_entropy_penalty_enable', default=False,
+                        type=lambda x: str(x).lower() in ('1', 'true', 'yes', 'y'))
+    parser.add_argument('--moe_router_entropy_penalty_weight', default=1e-3, type=float)
 
     parser.add_argument('--n_source', default=3000, type=int)
     parser.add_argument('--n_target', default=50, type=int)

@@ -36,8 +36,12 @@ class MoeAnalysisTests(unittest.TestCase):
             dropout_rate=0.0,
             num_experts=4,
             moe_gate_hidden_dim=8,
+            moe_router_temperature_enable=True,
+            moe_balance_loss_enable=True,
+            moe_router_entropy_penalty_enable=True,
         )
         model.eval()
+        model.ffn_omic.set_current_epoch(12)
 
         source = torch.randn(5, 6)
         neighbors = torch.randn(5, 8, 6)
@@ -52,6 +56,7 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertEqual(moe_info["gate_weights"].shape, (5, 9, 4))
         self.assertEqual(moe_info["center_gate_weights"].shape, (5, 4))
         self.assertEqual(moe_info["center_top1_expert"].shape, (5,))
+        self.assertEqual(moe_info["center_gate_margin"].shape, (5,))
         self.assertTrue(
             torch.allclose(
                 moe_info["center_gate_weights"].sum(dim=-1),
@@ -59,6 +64,10 @@ class MoeAnalysisTests(unittest.TestCase):
                 atol=1e-6,
             )
         )
+        self.assertAlmostEqual(float(moe_info["router_temperature"]), 0.5, places=6)
+        self.assertGreaterEqual(float(moe_info["balance_loss"].detach()), 0.0)
+        self.assertGreaterEqual(float(moe_info["router_entropy_penalty"].detach()), 0.0)
+        self.assertGreaterEqual(float(moe_info["expert_output_cosine_std"].detach()), 0.0)
 
     def test_analysis_utilities_collect_metrics_and_regions(self):
         torch.manual_seed(1)
@@ -69,7 +78,11 @@ class MoeAnalysisTests(unittest.TestCase):
             dropout_rate=0.0,
             num_experts=3,
             moe_gate_hidden_dim=8,
+            moe_router_temperature_enable=True,
+            moe_balance_loss_enable=True,
+            moe_router_entropy_penalty_enable=True,
         )
+        model.ffn_omic.set_current_epoch(6)
         loader = DataLoader(TinySpatialDataset(), batch_size=2, shuffle=False)
 
         results = analyze_moe_routing(
@@ -95,6 +108,11 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertEqual(overall["num_experts"], 3)
         self.assertGreaterEqual(overall["usage_entropy_normalised"], 0.0)
         self.assertLessEqual(overall["usage_entropy_normalised"], 1.0)
+        self.assertIn("router_temperature", overall)
+        self.assertIn("balance_loss", overall)
+        self.assertIn("router_entropy_penalty", overall)
+        self.assertIn("mean_gate_margin", overall)
+        self.assertIn("expert_output_cosine_mean", overall)
 
         self.assertFalse(results["batch_summary"].empty)
         self.assertFalse(results["slice_summary"].empty)
@@ -119,8 +137,27 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertEqual(expert_summary["average_activation_weight"].tolist(), [0.5, 0.5])
         self.assertEqual(expert_summary["top1_selection_frequency"].tolist(), [0.5, 0.5])
         self.assertTrue(math.isclose(metrics["overall"]["effective_expert_count"], 2.0, rel_tol=1e-4))
+        self.assertAlmostEqual(metrics["overall"]["mean_gate_margin"], 0.7, places=6)
         self.assertFalse(metrics["slice_differences"].empty)
         self.assertFalse(metrics["region_differences"].empty)
+
+    def test_router_temperature_schedule_respects_epoch_bands(self):
+        model = NicheTrans(
+            source_length=6,
+            target_length=3,
+            noise_rate=0.0,
+            dropout_rate=0.0,
+            num_experts=2,
+            moe_gate_hidden_dim=8,
+            moe_router_temperature_enable=True,
+        )
+
+        model.ffn_omic.set_current_epoch(1)
+        self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 1.0, places=6)
+        model.ffn_omic.set_current_epoch(7)
+        self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 0.7, places=6)
+        model.ffn_omic.set_current_epoch(11)
+        self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 0.5, places=6)
 
 
 if __name__ == "__main__":

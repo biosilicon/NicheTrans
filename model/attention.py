@@ -45,7 +45,17 @@ class FeedForwardExpert(nn.Sequential):
 
 
 class SoftmaxGate(nn.Module):
-    def __init__(self, dim, num_experts, hidden_dim=None):
+    def __init__(
+        self,
+        dim,
+        num_experts,
+        hidden_dim=None,
+        temperature_enable=False,
+        temperature_start=1.0,
+        temperature_mid=0.7,
+        temperature_end=0.5,
+        temperature_schedule="step",
+    ):
         super().__init__()
         if hidden_dim is None:
             self.net = nn.Linear(dim, num_experts)
@@ -60,13 +70,81 @@ class SoftmaxGate(nn.Module):
             nn.init.zeros_(self.net[-1].weight)
             nn.init.zeros_(self.net[-1].bias)
 
+        self.temperature_enable = bool(temperature_enable)
+        self.temperature_start = float(temperature_start)
+        self.temperature_mid = float(temperature_mid)
+        self.temperature_end = float(temperature_end)
+        self.temperature_schedule = str(temperature_schedule).lower()
+        self.current_epoch = 1
+
+    def set_current_epoch(self, epoch):
+        self.current_epoch = max(int(epoch), 1)
+
+    def get_router_temperature(self):
+        if not self.temperature_enable:
+            return 1.0
+
+        epoch = max(int(self.current_epoch), 1)
+        if self.temperature_schedule == "step":
+            if epoch <= 5:
+                return self.temperature_start
+            if epoch <= 10:
+                return self.temperature_mid
+            return self.temperature_end
+
+        if self.temperature_schedule == "linear":
+            if epoch <= 5:
+                progress = 0.0 if epoch <= 1 else float(epoch - 1) / 4.0
+                return self.temperature_start + progress * (self.temperature_mid - self.temperature_start)
+            if epoch <= 10:
+                progress = float(epoch - 6) / 4.0
+                return self.temperature_mid + progress * (self.temperature_end - self.temperature_mid)
+            return self.temperature_end
+
+        raise ValueError(f"Unsupported router temperature schedule: {self.temperature_schedule}")
+
     def forward(self, x):
-        return self.net(x).softmax(dim=-1)
+        gate_logits = self.net(x)
+        tau = max(float(self.get_router_temperature()), 1e-6)
+        gate_weights = (gate_logits / tau).softmax(dim=-1)
+        return gate_weights, gate_logits, tau
 
 
 def compute_expert_entropy(weights, eps=1e-12):
     clipped = weights.clamp_min(eps)
     return -(clipped * clipped.log()).sum(dim=-1)
+
+
+def compute_gate_margin(weights):
+    num_experts = weights.shape[-1]
+    if num_experts <= 1:
+        return torch.zeros(*weights.shape[:-1], device=weights.device, dtype=weights.dtype)
+    if num_experts == 2:
+        return (weights[..., 0] - weights[..., 1]).abs()
+    top2 = weights.topk(k=2, dim=-1).values
+    return top2[..., 0] - top2[..., 1]
+
+
+def compute_expert_output_similarity(expert_outputs, eps=1e-8):
+    if expert_outputs.shape[-2] <= 1:
+        zero = expert_outputs.new_tensor(0.0)
+        return zero, zero
+
+    if expert_outputs.ndim == 4:
+        features = expert_outputs.mean(dim=1)
+    elif expert_outputs.ndim == 3:
+        features = expert_outputs
+    else:
+        raise ValueError(
+            "Expert output similarity expects expert outputs with shape [B, E, D] or [B, L, E, D]."
+        )
+
+    num_experts = features.shape[1]
+    pair_index = torch.triu_indices(num_experts, num_experts, offset=1, device=features.device)
+    left = features[:, pair_index[0], :]
+    right = features[:, pair_index[1], :]
+    cosine_values = F.cosine_similarity(left, right, dim=-1, eps=eps)
+    return cosine_values.mean(), cosine_values.std(unbiased=False)
 
 
 def build_moe_output(predictions, routing_info, center_token_index=0):
@@ -86,6 +164,7 @@ def build_moe_output(predictions, routing_info, center_token_index=0):
         "center_gate_weights": center_gate_weights,
         "center_top1_expert": center_gate_weights.argmax(dim=-1),
         "center_entropy": compute_expert_entropy(center_gate_weights),
+        "center_gate_margin": compute_gate_margin(center_gate_weights),
     }
     return {"predictions": predictions, "moe_info": moe_info}
 
@@ -99,7 +178,17 @@ class FeedForward(nn.Module):
         num_experts=1,
         gate_hidden_dim=None,
         use_moe=True,
-        gate_type='softmax'
+        gate_type='softmax',
+        router_temperature_enable=False,
+        router_temperature_start=1.0,
+        router_temperature_mid=0.7,
+        router_temperature_end=0.5,
+        router_temperature_schedule="step",
+        balance_loss_enable=False,
+        balance_loss_weight=1e-3,
+        balance_loss_type="mse_uniform",
+        router_entropy_penalty_enable=False,
+        router_entropy_penalty_weight=1e-3,
     ):
         super().__init__()
         self.dim = dim
@@ -109,6 +198,12 @@ class FeedForward(nn.Module):
         self.gate_hidden_dim = gate_hidden_dim
         self.num_experts = max(int(num_experts), 1) if use_moe else 1
         self.use_moe = self.num_experts > 1
+        self.balance_loss_enable = bool(balance_loss_enable)
+        self.balance_loss_weight = float(balance_loss_weight)
+        self.balance_loss_type = str(balance_loss_type).lower()
+        self.router_entropy_penalty_enable = bool(router_entropy_penalty_enable)
+        self.router_entropy_penalty_weight = float(router_entropy_penalty_weight)
+        self.current_epoch = 1
 
         # Keep the first expert under the legacy `net` name so old checkpoints
         # continue to map cleanly when num_experts == 1.
@@ -124,10 +219,37 @@ class FeedForward(nn.Module):
             self.gate = SoftmaxGate(
                 dim=dim,
                 num_experts=self.num_experts,
-                hidden_dim=gate_hidden_dim
+                hidden_dim=gate_hidden_dim,
+                temperature_enable=router_temperature_enable,
+                temperature_start=router_temperature_start,
+                temperature_mid=router_temperature_mid,
+                temperature_end=router_temperature_end,
+                temperature_schedule=router_temperature_schedule,
             )
         else:
             self.gate = None
+
+    def set_current_epoch(self, epoch):
+        self.current_epoch = max(int(epoch), 1)
+        if self.gate is not None and hasattr(self.gate, "set_current_epoch"):
+            self.gate.set_current_epoch(self.current_epoch)
+
+    def _compute_balance_loss(self, gate_weights):
+        if not self.balance_loss_enable or gate_weights.shape[-1] <= 1:
+            return gate_weights.new_tensor(0.0)
+        if self.balance_loss_type != "mse_uniform":
+            raise ValueError(f"Unsupported balance loss type: {self.balance_loss_type}")
+
+        flat_weights = gate_weights.reshape(-1, gate_weights.shape[-1])
+        mean_usage = flat_weights.mean(dim=0)
+        uniform = torch.full_like(mean_usage, 1.0 / mean_usage.numel())
+        return ((mean_usage - uniform) ** 2).sum()
+
+    def _compute_router_entropy_penalty(self, gate_weights):
+        if not self.router_entropy_penalty_enable or gate_weights.shape[-1] <= 1:
+            return gate_weights.new_tensor(0.0)
+        flat_weights = gate_weights.reshape(-1, gate_weights.shape[-1])
+        return compute_expert_entropy(flat_weights).mean()
 
     def forward(self, x, return_routing=False):
         if not self.use_moe:
@@ -135,6 +257,7 @@ class FeedForward(nn.Module):
             if not return_routing:
                 return output
 
+            zero = output.new_tensor(0.0)
             gate_weights = torch.ones(
                 *x.shape[:-1],
                 1,
@@ -150,23 +273,48 @@ class FeedForward(nn.Module):
                 ),
                 "num_experts": 1,
                 "gate_type": "single_expert",
+                "router_temperature": output.new_tensor(1.0),
+                "balance_loss": zero,
+                "router_entropy_penalty": zero,
+                "moe_aux_loss": zero,
+                "mean_gate_margin": zero,
+                "std_gate_margin": zero,
+                "expert_output_cosine_mean": zero,
+                "expert_output_cosine_std": zero,
             }
             return output, routing_info
 
         expert_outputs = [self.net(x)]
         expert_outputs.extend(expert(x) for expert in self.extra_experts)
         expert_outputs = torch.stack(expert_outputs, dim=-2)
-        gate_weights = self.gate(x)
+        gate_weights, gate_logits, router_temperature = self.gate(x)
         output = (expert_outputs * gate_weights.unsqueeze(dim=-1)).sum(dim=-2)
 
         if not return_routing:
             return output
 
+        balance_loss = self._compute_balance_loss(gate_weights)
+        router_entropy_penalty = self._compute_router_entropy_penalty(gate_weights)
+        gate_margin = compute_gate_margin(gate_weights)
+        expert_output_cosine_mean, expert_output_cosine_std = compute_expert_output_similarity(expert_outputs)
+        moe_aux_loss = (
+            self.balance_loss_weight * balance_loss
+            + self.router_entropy_penalty_weight * router_entropy_penalty
+        )
         routing_info = {
             "gate_weights": gate_weights,
+            "gate_logits": gate_logits,
             "top1_expert": gate_weights.argmax(dim=-1),
             "num_experts": self.num_experts,
             "gate_type": self.gate_type,
+            "router_temperature": output.new_tensor(float(router_temperature)),
+            "balance_loss": balance_loss,
+            "router_entropy_penalty": router_entropy_penalty,
+            "moe_aux_loss": moe_aux_loss,
+            "mean_gate_margin": gate_margin.mean(),
+            "std_gate_margin": gate_margin.std(unbiased=False),
+            "expert_output_cosine_mean": expert_output_cosine_mean,
+            "expert_output_cosine_std": expert_output_cosine_std,
         }
         return output, routing_info
 

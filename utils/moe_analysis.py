@@ -28,7 +28,11 @@ def _to_numpy(value: Any) -> np.ndarray:
 
 def _expert_columns(frame: pd.DataFrame) -> list[str]:
     return sorted(
-        [column for column in frame.columns if column.startswith("expert_")],
+        [
+            column
+            for column in frame.columns
+            if re.fullmatch(r"expert_\d+", column)
+        ],
         key=lambda name: int(name.split("_")[1]),
     )
 
@@ -53,6 +57,15 @@ def _l1_to_uniform(probabilities: np.ndarray) -> float:
         return 0.0
     uniform = np.full(num_experts, 1.0 / num_experts, dtype=float)
     return float(np.abs(probabilities.mean(axis=0) - uniform).sum())
+
+
+def _balance_loss_to_uniform(probabilities: np.ndarray) -> float:
+    num_experts = probabilities.shape[-1]
+    if num_experts <= 1:
+        return 0.0
+    uniform = np.full(num_experts, 1.0 / num_experts, dtype=float)
+    mean_distribution = probabilities.mean(axis=0)
+    return float(((mean_distribution - uniform) ** 2).sum())
 
 
 def _effective_expert_count(probabilities: np.ndarray) -> float:
@@ -87,6 +100,13 @@ def _summarise_probability_block(probabilities: np.ndarray) -> dict[str, Any]:
     top1_frequency = np.bincount(top1_index, minlength=num_experts) / max(num_spots, 1)
     mean_weights = probabilities.mean(axis=0)
     top1_entropy = float(_soft_entropy(top1_frequency[None, :])[0]) if num_experts > 1 else 0.0
+    if num_experts <= 1:
+        gate_margin = np.zeros(num_spots, dtype=float)
+    elif num_experts == 2:
+        gate_margin = np.abs(probabilities[:, 0] - probabilities[:, 1])
+    else:
+        top2 = np.sort(probabilities, axis=1)[:, -2:]
+        gate_margin = top2[:, 1] - top2[:, 0]
 
     return {
         "num_center_spots": int(num_spots),
@@ -98,11 +118,14 @@ def _summarise_probability_block(probabilities: np.ndarray) -> dict[str, Any]:
         "effective_expert_count": _effective_expert_count(probabilities),
         "dominant_expert_fraction": float(mean_weights.max()),
         "mean_weight_l1_to_uniform": _l1_to_uniform(probabilities),
+        "balance_loss": _balance_loss_to_uniform(probabilities),
         "top1_l1_to_uniform": float(
             np.abs(top1_frequency - np.full(num_experts, 1.0 / num_experts)).sum()
         ) if num_experts > 1 else 0.0,
         "mean_spot_entropy": float(_soft_entropy(probabilities).mean()),
         "std_spot_entropy": float(_soft_entropy(probabilities).std()),
+        "mean_gate_margin": float(gate_margin.mean()) if gate_margin.size else 0.0,
+        "std_gate_margin": float(gate_margin.std()) if gate_margin.size else 0.0,
         "expert_mean_weights": mean_weights,
         "expert_top1_frequency": top1_frequency,
     }
@@ -255,6 +278,19 @@ def collect_moe_activations(
             center_gate_weights = _to_numpy(moe_info["center_gate_weights"])
             center_entropy = _to_numpy(moe_info["center_entropy"])
             center_top1 = _to_numpy(moe_info["center_top1_expert"]).astype(int)
+            center_gate_margin = _to_numpy(
+                moe_info.get("center_gate_margin", np.zeros(center_gate_weights.shape[0], dtype=float))
+            )
+            shared_record_fields = {}
+            for key in (
+                "router_temperature",
+                "balance_loss",
+                "router_entropy_penalty",
+                "expert_output_cosine_mean",
+                "expert_output_cosine_std",
+            ):
+                if key in moe_info:
+                    shared_record_fields[key] = float(_to_numpy(moe_info[key]))
 
             if include_predictions:
                 predictions_np = _to_numpy(predictions)
@@ -281,9 +317,11 @@ def collect_moe_activations(
                     "top1_expert": int(center_top1[row_index]),
                     "top1_weight": float(center_gate_weights[row_index].max()),
                     "center_entropy": float(center_entropy[row_index]),
+                    "gate_margin": float(center_gate_margin[row_index]),
                     "effective_expert_count_per_spot": float(
                         math.exp(float(center_entropy[row_index]))
                     ),
+                    **shared_record_fields,
                 }
 
                 for expert_index, weight in enumerate(center_gate_weights[row_index]):
@@ -354,11 +392,23 @@ def compute_grouped_usage_metrics(
                 "effective_expert_count": summary["effective_expert_count"],
                 "dominant_expert_fraction": summary["dominant_expert_fraction"],
                 "mean_weight_l1_to_uniform": summary["mean_weight_l1_to_uniform"],
+                "balance_loss": summary["balance_loss"],
                 "top1_l1_to_uniform": summary["top1_l1_to_uniform"],
                 "mean_spot_entropy": summary["mean_spot_entropy"],
                 "std_spot_entropy": summary["std_spot_entropy"],
+                "mean_gate_margin": summary["mean_gate_margin"],
+                "std_gate_margin": summary["std_gate_margin"],
             }
         )
+        for column in (
+            "router_temperature",
+            "balance_loss",
+            "router_entropy_penalty",
+            "expert_output_cosine_mean",
+            "expert_output_cosine_std",
+        ):
+            if column in group_frame.columns:
+                group_record[column] = float(group_frame[column].mean())
         records.append(group_record)
 
     return pd.DataFrame.from_records(records)
@@ -498,10 +548,22 @@ def compute_expert_usage_metrics(
         "effective_expert_count": summary["effective_expert_count"],
         "dominant_expert_fraction": summary["dominant_expert_fraction"],
         "mean_weight_l1_to_uniform": summary["mean_weight_l1_to_uniform"],
+        "balance_loss": summary["balance_loss"],
         "top1_l1_to_uniform": summary["top1_l1_to_uniform"],
         "mean_spot_entropy": summary["mean_spot_entropy"],
         "std_spot_entropy": summary["std_spot_entropy"],
+        "mean_gate_margin": summary["mean_gate_margin"],
+        "std_gate_margin": summary["std_gate_margin"],
     }
+    for column in (
+        "router_temperature",
+        "balance_loss",
+        "router_entropy_penalty",
+        "expert_output_cosine_mean",
+        "expert_output_cosine_std",
+    ):
+        if column in output_frame.columns:
+            overall[column] = float(output_frame[column].mean())
 
     return {
         "activation_frame": output_frame,
