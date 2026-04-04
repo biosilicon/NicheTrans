@@ -166,6 +166,46 @@ class MoeAnalysisTests(unittest.TestCase):
         model.ffn_omic.set_current_epoch(11)
         self.assertAlmostEqual(model.ffn_omic.gate.get_router_temperature(), 0.5, places=6)
 
+    def test_per_layer_hparams_can_differ_between_moe_blocks(self):
+        model = NicheTrans(
+            source_length=6,
+            target_length=3,
+            noise_rate=0.0,
+            dropout_rate=0.0,
+            num_experts=[2, 4],
+            moe_gate_hidden_dim=[0, 16],
+            ffn_mult=[2, 3],
+            moe_num_layers=2,
+            moe_router_temperature_enable=[False, True],
+            moe_router_temperature_start=[1.0, 0.9],
+            moe_router_temperature_mid=[0.7, 0.6],
+            moe_router_temperature_end=[0.5, 0.4],
+            moe_balance_loss_enable=[False, True],
+            moe_balance_loss_weight=[1e-3, 2e-3],
+            moe_router_entropy_penalty_enable=[False, True],
+            moe_router_entropy_penalty_weight=[1e-3, 3e-3],
+        )
+
+        self.assertEqual(model.ffn_omic.num_experts, 2)
+        self.assertEqual(model.extra_ffn_omic[0].num_experts, 4)
+        self.assertEqual(model.ffn_omic.mult, 2)
+        self.assertEqual(model.extra_ffn_omic[0].mult, 3)
+        self.assertIsInstance(model.ffn_omic.gate.net, torch.nn.Linear)
+        self.assertIsInstance(model.extra_ffn_omic[0].gate.net, torch.nn.Sequential)
+        self.assertFalse(model.ffn_omic.gate.temperature_enable)
+        self.assertTrue(model.extra_ffn_omic[0].gate.temperature_enable)
+        self.assertFalse(model.ffn_omic.balance_loss_enable)
+        self.assertTrue(model.extra_ffn_omic[0].balance_loss_enable)
+        self.assertFalse(model.ffn_omic.router_entropy_penalty_enable)
+        self.assertTrue(model.extra_ffn_omic[0].router_entropy_penalty_enable)
+
+        source = torch.randn(3, 6)
+        neighbors = torch.randn(3, 8, 6)
+        moe_info = model(source, neighbors, return_moe_info=True)["moe_info"]
+        self.assertEqual(moe_info["moe_num_layers"], 2)
+        self.assertEqual(moe_info["layer_routing_info"][0]["gate_weights"].shape[-1], 2)
+        self.assertEqual(moe_info["layer_routing_info"][1]["gate_weights"].shape[-1], 4)
+
     def test_stacked_moe_layers_aggregate_metrics_and_load_legacy_checkpoint(self):
         torch.manual_seed(2)
         legacy_model = NicheTrans(
@@ -248,6 +288,7 @@ class MoeAnalysisTests(unittest.TestCase):
         )
         self.assertEqual(sorted(layerwise_trajectory["by_layer"]), ["layer_0", "layer_1"])
         self.assertEqual(len(layerwise_trajectory["combined"]), 4)
+        self.assertEqual(len(layerwise_trajectory["epoch_summary"]), 2)
         self.assertEqual(
             layerwise_trajectory["combined"]["moe_layer_index"].tolist(),
             [0, 0, 1, 1],

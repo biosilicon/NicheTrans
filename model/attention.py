@@ -6,6 +6,8 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch import nn, einsum
 
+from utils.moe_config import resolve_moe_layer_configs
+
 
 def exists(val):
     return val is not None
@@ -249,7 +251,26 @@ def build_omic_block_stack(
     heads=4,
     dim_head=64,
 ):
-    def build_single_block():
+    layer_configs = resolve_moe_layer_configs(
+        num_layers=num_layers,
+        num_experts=num_experts,
+        gate_hidden_dim=gate_hidden_dim,
+        mult=mult,
+        use_moe=use_moe,
+        gate_type=gate_type,
+        router_temperature_enable=router_temperature_enable,
+        router_temperature_start=router_temperature_start,
+        router_temperature_mid=router_temperature_mid,
+        router_temperature_end=router_temperature_end,
+        router_temperature_schedule=router_temperature_schedule,
+        balance_loss_enable=balance_loss_enable,
+        balance_loss_weight=balance_loss_weight,
+        balance_loss_type=balance_loss_type,
+        router_entropy_penalty_enable=router_entropy_penalty_enable,
+        router_entropy_penalty_weight=router_entropy_penalty_weight,
+    )
+
+    def build_single_block(layer_config):
         return (
             Self_Attention(
                 query_dim=dim,
@@ -260,36 +281,36 @@ def build_omic_block_stack(
             ),
             FeedForward(
                 dim=dim,
-                mult=mult,
+                mult=layer_config["mult"],
                 dropout=dropout,
-                num_experts=num_experts,
-                gate_hidden_dim=gate_hidden_dim,
-                use_moe=use_moe,
-                gate_type=gate_type,
-                router_temperature_enable=router_temperature_enable,
-                router_temperature_start=router_temperature_start,
-                router_temperature_mid=router_temperature_mid,
-                router_temperature_end=router_temperature_end,
-                router_temperature_schedule=router_temperature_schedule,
-                balance_loss_enable=balance_loss_enable,
-                balance_loss_weight=balance_loss_weight,
-                balance_loss_type=balance_loss_type,
-                router_entropy_penalty_enable=router_entropy_penalty_enable,
-                router_entropy_penalty_weight=router_entropy_penalty_weight,
+                num_experts=layer_config["num_experts"],
+                gate_hidden_dim=layer_config["gate_hidden_dim"],
+                use_moe=layer_config["use_moe"],
+                gate_type=layer_config["gate_type"],
+                router_temperature_enable=layer_config["router_temperature_enable"],
+                router_temperature_start=layer_config["router_temperature_start"],
+                router_temperature_mid=layer_config["router_temperature_mid"],
+                router_temperature_end=layer_config["router_temperature_end"],
+                router_temperature_schedule=layer_config["router_temperature_schedule"],
+                balance_loss_enable=layer_config["balance_loss_enable"],
+                balance_loss_weight=layer_config["balance_loss_weight"],
+                balance_loss_type=layer_config["balance_loss_type"],
+                router_entropy_penalty_enable=layer_config["router_entropy_penalty_enable"],
+                router_entropy_penalty_weight=layer_config["router_entropy_penalty_weight"],
             ),
             nn.LayerNorm(dim),
             nn.LayerNorm(dim),
         )
 
-    total_layers = max(int(num_layers), 1)
-    fusion_omic, ffn_omic, ln1, ln2 = build_single_block()
+    total_layers = len(layer_configs)
+    fusion_omic, ffn_omic, ln1, ln2 = build_single_block(layer_configs[0])
     extra_fusion_omic = nn.ModuleList()
     extra_ffn_omic = nn.ModuleList()
     extra_ln1 = nn.ModuleList()
     extra_ln2 = nn.ModuleList()
 
-    for _ in range(total_layers - 1):
-        block_fusion, block_ffn, block_ln1, block_ln2 = build_single_block()
+    for layer_config in layer_configs[1:]:
+        block_fusion, block_ffn, block_ln1, block_ln2 = build_single_block(layer_config)
         extra_fusion_omic.append(block_fusion)
         extra_ffn_omic.append(block_ffn)
         extra_ln1.append(block_ln1)

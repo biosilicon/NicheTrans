@@ -66,10 +66,10 @@ class NicheTrans(StackedMoEModelMixin, nn.Module):
         self.source_length, self.target_length = source_length, target_length
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
         self.use_moe_ffn = use_moe_ffn
-        self.num_experts = max(int(num_experts), 1)
-        self.moe_gate_hidden_dim = None if moe_gate_hidden_dim in (None, 0) else int(moe_gate_hidden_dim)
+        self.num_experts = num_experts
+        self.moe_gate_hidden_dim = moe_gate_hidden_dim
         self.moe_gate_type = moe_gate_type
-        self.ffn_mult = int(ffn_mult)
+        self.ffn_mult = ffn_mult
         self.moe_num_layers = max(int(moe_num_layers), 1)
 
         self.fea_size, self.img_size = 256, 128

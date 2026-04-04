@@ -868,6 +868,7 @@ def summarize_layerwise_epoch_trajectory(
     if combined.empty:
         return {
             "combined": pd.DataFrame(),
+            "epoch_summary": pd.DataFrame(),
             "by_layer": {},
         }
 
@@ -883,8 +884,18 @@ def summarize_layerwise_epoch_trajectory(
         str(layer_name): layer_frame.reset_index(drop=True)
         for layer_name, layer_frame in combined.groupby("layer_name", sort=False)
     }
+    epoch_summary = (
+        combined
+        .drop(columns=["layer_name"], errors="ignore")
+        .groupby("epoch", dropna=False)
+        .mean(numeric_only=True)
+        .reset_index()
+        .sort_values("epoch")
+        .reset_index(drop=True)
+    )
     return {
         "combined": combined,
+        "epoch_summary": epoch_summary,
         "by_layer": by_layer,
     }
 
