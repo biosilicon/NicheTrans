@@ -12,6 +12,7 @@ from utils.moe_analysis import (
     analyze_moe_routing,
     compute_expert_usage_metrics,
     save_moe_analysis_tables,
+    summarize_layerwise_epoch_trajectory,
 )
 
 
@@ -238,6 +239,19 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertIn("layer_1_activation_frame", saved_paths)
         self.assertIn("layer_0_overall", saved_paths)
         self.assertIn("layer_1_overall", saved_paths)
+
+        layerwise_trajectory = summarize_layerwise_epoch_trajectory(
+            {
+                1: results["layer_activation_frames"],
+                2: results["layer_activation_frames"],
+            }
+        )
+        self.assertEqual(sorted(layerwise_trajectory["by_layer"]), ["layer_0", "layer_1"])
+        self.assertEqual(len(layerwise_trajectory["combined"]), 4)
+        self.assertEqual(
+            layerwise_trajectory["combined"]["moe_layer_index"].tolist(),
+            [0, 0, 1, 1],
+        )
 
 
 if __name__ == "__main__":

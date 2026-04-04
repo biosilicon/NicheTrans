@@ -826,6 +826,69 @@ def summarize_epoch_trajectory(epoch_activation_frames: Mapping[Any, pd.DataFram
     return pd.DataFrame.from_records(records).sort_values("epoch").reset_index(drop=True)
 
 
+def summarize_layerwise_epoch_trajectory(
+    epoch_layer_activation_frames: Mapping[Any, Any],
+) -> dict[str, Any]:
+    """Track specialisation trends for every MoE layer over training epochs.
+
+    Expected input shape:
+    - `{epoch: {"layer_0": frame0, "layer_1": frame1, ...}}`, or
+    - `{epoch: analysis_result}` where `analysis_result["layer_activation_frames"]`
+      stores the per-layer activation frames returned by `analyze_moe_routing(...)`.
+    """
+    records: list[dict[str, Any]] = []
+
+    for epoch, layer_payload in epoch_layer_activation_frames.items():
+        if isinstance(layer_payload, Mapping) and "layer_activation_frames" in layer_payload:
+            layer_frames = layer_payload.get("layer_activation_frames", {})
+        else:
+            layer_frames = layer_payload
+
+        if not isinstance(layer_frames, Mapping):
+            continue
+
+        for layer_name in sorted(layer_frames, key=_layer_sort_key):
+            layer_frame = layer_frames.get(layer_name)
+            if not isinstance(layer_frame, pd.DataFrame) or layer_frame.empty:
+                continue
+
+            metrics = compute_expert_usage_metrics(layer_frame, add_spatial_regions=False)
+            record = {
+                "epoch": epoch,
+                "layer_name": str(layer_name),
+                **metrics["overall"],
+            }
+            if "moe_layer_index" not in record and "moe_layer_index" in layer_frame.columns:
+                record["moe_layer_index"] = int(layer_frame["moe_layer_index"].iloc[0])
+            if "moe_num_layers" not in record and "moe_num_layers" in layer_frame.columns:
+                record["moe_num_layers"] = int(layer_frame["moe_num_layers"].iloc[0])
+            records.append(record)
+
+    combined = pd.DataFrame.from_records(records)
+    if combined.empty:
+        return {
+            "combined": pd.DataFrame(),
+            "by_layer": {},
+        }
+
+    sort_columns = [
+        column
+        for column in ("moe_layer_index", "layer_name", "epoch")
+        if column in combined.columns
+    ]
+    if sort_columns:
+        combined = combined.sort_values(sort_columns).reset_index(drop=True)
+
+    by_layer = {
+        str(layer_name): layer_frame.reset_index(drop=True)
+        for layer_name, layer_frame in combined.groupby("layer_name", sort=False)
+    }
+    return {
+        "combined": combined,
+        "by_layer": by_layer,
+    }
+
+
 def _slice_frame(activation_frame: pd.DataFrame, slice_id: str | None) -> pd.DataFrame:
     if activation_frame.empty:
         raise ValueError("Activation dataframe is empty.")
