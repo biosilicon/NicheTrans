@@ -7,7 +7,6 @@ import argparse
 import csv
 import itertools
 import json
-import math
 import os
 import sys
 import time
@@ -16,6 +15,8 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
+
+from utils.moe_config import parse_literal_value, split_top_level_commas
 
 
 COMMON_METRIC_KEYS = [
@@ -37,31 +38,7 @@ COMMON_METRIC_KEYS = [
 
 
 def parse_scalar(raw: str) -> Any:
-    text = raw.strip()
-    lowered = text.lower()
-
-    if lowered in {"true", "yes", "y", "on"}:
-        return True
-    if lowered in {"false", "no", "n", "off"}:
-        return False
-    if lowered in {"none", "null"}:
-        return None
-
-    try:
-        if text.startswith("0") and len(text) > 1 and text[1].isdigit() and "." not in text:
-            raise ValueError
-        return int(text)
-    except ValueError:
-        pass
-
-    try:
-        value = float(text)
-        if math.isfinite(value):
-            return value
-    except ValueError:
-        pass
-
-    return text
+    return parse_literal_value(raw)
 
 
 def normalize_key(key: str) -> str:
@@ -79,7 +56,7 @@ def parse_grid_assignment(raw: str) -> tuple[str, list[Any]]:
     if "=" not in raw:
         raise ValueError(f"Expected KEY=V1,V2,..., got: {raw}")
     key, value = raw.split("=", 1)
-    values = [parse_scalar(item) for item in value.split(",") if item.strip()]
+    values = [parse_scalar(item) for item in split_top_level_commas(value) if item.strip()]
     if not values:
         raise ValueError(f"Grid for '{key}' is empty.")
     return normalize_key(key), values
