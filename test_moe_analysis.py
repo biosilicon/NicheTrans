@@ -35,6 +35,7 @@ class MoeAnalysisTests(unittest.TestCase):
             noise_rate=0.0,
             dropout_rate=0.0,
             num_experts=4,
+            moe_top_k=2,
             moe_gate_hidden_dim=8,
             moe_router_temperature_enable=True,
             moe_balance_loss_enable=True,
@@ -57,6 +58,7 @@ class MoeAnalysisTests(unittest.TestCase):
         self.assertEqual(moe_info["center_gate_weights"].shape, (5, 4))
         self.assertEqual(moe_info["center_top1_expert"].shape, (5,))
         self.assertEqual(moe_info["center_gate_margin"].shape, (5,))
+        self.assertEqual(int(moe_info["routing_top_k"]), 2)
         self.assertTrue(
             torch.allclose(
                 moe_info["center_gate_weights"].sum(dim=-1),
@@ -64,6 +66,7 @@ class MoeAnalysisTests(unittest.TestCase):
                 atol=1e-6,
             )
         )
+        self.assertTrue((moe_info["gate_weights"].gt(0).sum(dim=-1) <= 2).all())
         self.assertAlmostEqual(float(moe_info["router_temperature"]), 0.5, places=6)
         self.assertGreaterEqual(float(moe_info["balance_loss"].detach()), 0.0)
         self.assertGreaterEqual(float(moe_info["router_entropy_penalty"].detach()), 0.0)
@@ -77,6 +80,7 @@ class MoeAnalysisTests(unittest.TestCase):
             noise_rate=0.0,
             dropout_rate=0.0,
             num_experts=3,
+            moe_top_k=2,
             moe_gate_hidden_dim=8,
             moe_router_temperature_enable=True,
             moe_balance_loss_enable=True,
@@ -148,6 +152,7 @@ class MoeAnalysisTests(unittest.TestCase):
             noise_rate=0.0,
             dropout_rate=0.0,
             num_experts=2,
+            moe_top_k=2,
             moe_gate_hidden_dim=8,
             moe_router_temperature_enable=True,
         )

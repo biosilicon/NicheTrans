@@ -9,6 +9,7 @@ MODEL_HPARAM_KEYS = (
     "dropout_rate",
     "use_moe_ffn",
     "num_experts",
+    "moe_top_k",
     "moe_gate_hidden_dim",
     "moe_gate_type",
     "ffn_mult",

@@ -17,6 +17,7 @@ class NicheTrans_img(nn.Module):
         dropout_rate=0.1,
         use_moe_ffn=True,
         num_experts=1,
+        moe_top_k=2,
         moe_gate_hidden_dim=None,
         moe_gate_type='softmax',
         ffn_mult=2,
@@ -37,6 +38,7 @@ class NicheTrans_img(nn.Module):
         self.noise_rate, self.dropout_rate = noise_rate, dropout_rate
         self.use_moe_ffn = use_moe_ffn
         self.num_experts = max(int(num_experts), 1)
+        self.moe_top_k = max(int(moe_top_k), 1)
         self.moe_gate_hidden_dim = None if moe_gate_hidden_dim in (None, 0) else int(moe_gate_hidden_dim)
         self.moe_gate_type = moe_gate_type
         self.ffn_mult = int(ffn_mult)
@@ -64,6 +66,7 @@ class NicheTrans_img(nn.Module):
             mult=self.ffn_mult,
             dropout=self.dropout_rate,
             num_experts=self.num_experts,
+            moe_top_k=self.moe_top_k,
             gate_hidden_dim=self.moe_gate_hidden_dim,
             use_moe=self.use_moe_ffn,
             gate_type=self.moe_gate_type,

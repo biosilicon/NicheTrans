@@ -125,6 +125,18 @@ def compute_gate_margin(weights):
     return top2[..., 0] - top2[..., 1]
 
 
+def _pairwise_cosine_stats(features, eps=1e-8):
+    if features.shape[0] <= 1:
+        zero = features.new_tensor(0.0)
+        return zero, zero
+
+    pair_index = torch.triu_indices(features.shape[0], features.shape[0], offset=1, device=features.device)
+    left = features[pair_index[0]]
+    right = features[pair_index[1]]
+    cosine_values = F.cosine_similarity(left, right, dim=-1, eps=eps)
+    return cosine_values.mean(), cosine_values.std(unbiased=False)
+
+
 def compute_expert_output_similarity(expert_outputs, eps=1e-8):
     if expert_outputs.shape[-2] <= 1:
         zero = expert_outputs.new_tensor(0.0)
@@ -176,6 +188,7 @@ class FeedForward(nn.Module):
         mult=4,
         dropout=0.,
         num_experts=1,
+        moe_top_k=2,
         gate_hidden_dim=None,
         use_moe=True,
         gate_type='softmax',
@@ -198,6 +211,12 @@ class FeedForward(nn.Module):
         self.gate_hidden_dim = gate_hidden_dim
         self.num_experts = max(int(num_experts), 1) if use_moe else 1
         self.use_moe = self.num_experts > 1
+        requested_top_k = self.num_experts if moe_top_k in (None, 0) else int(moe_top_k)
+        self.moe_top_k = max(1, min(requested_top_k, self.num_experts))
+        self.use_sparse_routing = self.use_moe and self.moe_top_k < self.num_experts
+        # Small training-time router jitter prevents deterministic tie collapse
+        # when sparse top-k routing starts from near-uniform logits.
+        self.router_jitter_noise = 1e-2 if self.use_sparse_routing else 0.0
         self.balance_loss_enable = bool(balance_loss_enable)
         self.balance_loss_weight = float(balance_loss_weight)
         self.balance_loss_type = str(balance_loss_type).lower()
@@ -234,6 +253,61 @@ class FeedForward(nn.Module):
         if self.gate is not None and hasattr(self.gate, "set_current_epoch"):
             self.gate.set_current_epoch(self.current_epoch)
 
+    def _iter_experts(self):
+        yield self.net
+        yield from self.extra_experts
+
+    def _compute_gate_weights(self, gate_logits, router_temperature):
+        routing_logits = gate_logits
+        if self.training and self.router_jitter_noise > 0.0:
+            routing_logits = routing_logits + torch.randn_like(routing_logits) * self.router_jitter_noise
+
+        tau = max(float(router_temperature), 1e-6)
+        return (routing_logits / tau).softmax(dim=-1)
+
+    def _apply_topk_routing(self, gate_weights):
+        top_k = min(self.moe_top_k, gate_weights.shape[-1])
+        topk_weights, topk_indices = gate_weights.topk(k=top_k, dim=-1)
+
+        if not self.use_sparse_routing:
+            return gate_weights, topk_indices, topk_weights
+
+        normalised_topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(1e-9)
+        sparse_gate_weights = torch.zeros_like(gate_weights)
+        sparse_gate_weights.scatter_(-1, topk_indices, normalised_topk_weights)
+        return sparse_gate_weights, topk_indices, normalised_topk_weights
+
+    def _dispatch_to_sparse_experts(self, x, sparse_gate_weights):
+        flat_x = x.reshape(-1, x.shape[-1])
+        flat_gate_weights = sparse_gate_weights.reshape(-1, sparse_gate_weights.shape[-1])
+        flat_output = flat_x.new_zeros(flat_x.shape)
+        expert_mean_features = []
+
+        for expert_index, expert in enumerate(self._iter_experts()):
+            token_index = torch.nonzero(flat_gate_weights[:, expert_index] > 0, as_tuple=False).flatten()
+            if token_index.numel() == 0:
+                continue
+
+            expert_input = flat_x.index_select(0, token_index)
+            expert_output = expert(expert_input)
+            expert_weight = flat_gate_weights.index_select(0, token_index)[:, expert_index].unsqueeze(-1)
+            flat_output = flat_output.index_add(0, token_index, expert_output * expert_weight)
+            expert_mean_features.append(expert_output.mean(dim=0))
+
+        output = flat_output.view_as(x)
+        if not expert_mean_features:
+            zero = output.new_tensor(0.0)
+            return output, zero, zero, zero
+
+        active_expert_count = output.new_tensor(float(len(expert_mean_features)))
+        if len(expert_mean_features) == 1:
+            zero = output.new_tensor(0.0)
+            return output, zero, zero, active_expert_count
+
+        expert_features = torch.stack(expert_mean_features, dim=0)
+        expert_output_cosine_mean, expert_output_cosine_std = _pairwise_cosine_stats(expert_features)
+        return output, expert_output_cosine_mean, expert_output_cosine_std, active_expert_count
+
     def _compute_balance_loss(self, gate_weights):
         if not self.balance_loss_enable or gate_weights.shape[-1] <= 1:
             return gate_weights.new_tensor(0.0)
@@ -266,53 +340,79 @@ class FeedForward(nn.Module):
             )
             routing_info = {
                 "gate_weights": gate_weights,
+                "dense_gate_weights": gate_weights,
                 "top1_expert": torch.zeros(
                     *x.shape[:-1],
                     device=x.device,
                     dtype=torch.long
                 ),
+                "topk_expert_indices": torch.zeros(
+                    *x.shape[:-1],
+                    1,
+                    device=x.device,
+                    dtype=torch.long
+                ),
+                "topk_expert_weights": gate_weights,
                 "num_experts": 1,
                 "gate_type": "single_expert",
+                "routing_type": "single_expert",
+                "routing_top_k": 1,
                 "router_temperature": output.new_tensor(1.0),
                 "balance_loss": zero,
                 "router_entropy_penalty": zero,
                 "moe_aux_loss": zero,
                 "mean_gate_margin": zero,
                 "std_gate_margin": zero,
+                "active_expert_count": output.new_tensor(1.0),
                 "expert_output_cosine_mean": zero,
                 "expert_output_cosine_std": zero,
             }
             return output, routing_info
 
-        expert_outputs = [self.net(x)]
-        expert_outputs.extend(expert(x) for expert in self.extra_experts)
-        expert_outputs = torch.stack(expert_outputs, dim=-2)
-        gate_weights, gate_logits, router_temperature = self.gate(x)
-        output = (expert_outputs * gate_weights.unsqueeze(dim=-1)).sum(dim=-2)
+        _, gate_logits, router_temperature = self.gate(x)
+        dense_gate_weights = self._compute_gate_weights(gate_logits, router_temperature)
+        gate_weights, topk_expert_indices, topk_expert_weights = self._apply_topk_routing(dense_gate_weights)
+
+        if self.use_sparse_routing:
+            output, expert_output_cosine_mean, expert_output_cosine_std, active_expert_count = (
+                self._dispatch_to_sparse_experts(x, gate_weights)
+            )
+        else:
+            expert_outputs = [self.net(x)]
+            expert_outputs.extend(expert(x) for expert in self.extra_experts)
+            expert_outputs = torch.stack(expert_outputs, dim=-2)
+            output = (expert_outputs * gate_weights.unsqueeze(dim=-1)).sum(dim=-2)
+            expert_output_cosine_mean, expert_output_cosine_std = compute_expert_output_similarity(expert_outputs)
+            active_expert_count = output.new_tensor(float(self.num_experts))
 
         if not return_routing:
             return output
 
-        balance_loss = self._compute_balance_loss(gate_weights)
-        router_entropy_penalty = self._compute_router_entropy_penalty(gate_weights)
+        balance_loss = self._compute_balance_loss(dense_gate_weights)
+        router_entropy_penalty = self._compute_router_entropy_penalty(dense_gate_weights)
         gate_margin = compute_gate_margin(gate_weights)
-        expert_output_cosine_mean, expert_output_cosine_std = compute_expert_output_similarity(expert_outputs)
         moe_aux_loss = (
             self.balance_loss_weight * balance_loss
             + self.router_entropy_penalty_weight * router_entropy_penalty
         )
         routing_info = {
             "gate_weights": gate_weights,
+            "dense_gate_weights": dense_gate_weights,
             "gate_logits": gate_logits,
             "top1_expert": gate_weights.argmax(dim=-1),
+            "topk_expert_indices": topk_expert_indices,
+            "topk_expert_weights": topk_expert_weights,
             "num_experts": self.num_experts,
             "gate_type": self.gate_type,
+            "routing_type": "sparse_topk" if self.use_sparse_routing else "dense_softmax",
+            "routing_top_k": self.moe_top_k,
             "router_temperature": output.new_tensor(float(router_temperature)),
             "balance_loss": balance_loss,
             "router_entropy_penalty": router_entropy_penalty,
             "moe_aux_loss": moe_aux_loss,
             "mean_gate_margin": gate_margin.mean(),
             "std_gate_margin": gate_margin.std(unbiased=False),
+            "active_expert_count": active_expert_count,
             "expert_output_cosine_mean": expert_output_cosine_mean,
             "expert_output_cosine_std": expert_output_cosine_std,
         }

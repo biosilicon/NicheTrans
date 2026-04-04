@@ -93,6 +93,10 @@ Example:
 ```bash
 python train_sweep.py --dataset sma --grid-file sweep.json
 ```
+
+The MoE FFN now uses sparse top-k routing through `moe_top_k`. Set `moe_top_k=num_experts`
+if you want to recover the previous dense all-expert mixing behaviour.
+
 ## Model attribution analysis
 Apart from the spatial cross-omics translation, we also provided guidelines for attribution analysis in 'Tutorial 3.3', 'Tutorial 6.5', and 'Tutorial 6.6'.
 
